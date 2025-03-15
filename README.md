@@ -10,4 +10,4 @@
 
 Руководитель: [i2z1](https://github.com/i2z1)
 
-<img src="images/План%20работы-02.png" data-fig-align="center" />
+<img src="images/Analiz-repozitoriev-Git (3).png" data-fig-align="center" />
