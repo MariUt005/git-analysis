@@ -45,13 +45,15 @@ df <- git_diff_df %>%
   filter(!grepl('^ ', lines)) %>%
   filter(!grepl('^diff', lines)) %>%
   filter(!grepl('^index', lines)) %>%
+  filter(!grepl('^deleted', lines)) %>%
+  filter(!grepl('^new', lines)) %>%
   filter(lines != "")
 
 i = 1
 n = nrow(df)
 changesDf <- data.frame(commitHash= numeric(0), fileA= numeric(0), fileB= numeric(0), fromFileRange= numeric(0), toFileRange= numeric(0), isAdd= numeric(0), text= numeric(0))
 j = 1
-while (i < n) {
+while (i < 50000) {
   commit = NA
   fileA = NA
   fileB = NA
@@ -84,8 +86,11 @@ while (i < n) {
       i = i + 1
       j = j + 1
     }
+    if (!(grepl("^commit", df$lines[i]) | grepl("^---", df$lines[i]) | grepl("^\\+\\+\\+", df$lines[i]) | grepl("^@@", df$lines[i]))) {
+      i = i + 1
+    }
   }
-  print(j)
 }
 
+write_parquet(changesDf, paste(gsub("/", "_", strsplit(repo_url, "//")[[1]][2]),"_changes.parquet", sep=""))
 test <- read_parquet(paste(gsub("/", "_", strsplit(repo_url, "//")[[1]][2]),".parquet", sep=""))
