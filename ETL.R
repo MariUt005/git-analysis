@@ -110,9 +110,9 @@ getGitCommitHistory <- function(git_log_cmd, repo_name) {
 
 
 getGitDiff <- function(git_diff_cmd, repo_name) {
-  repo_name <- "git-analysis"
-  git_diff_cmd <- glue('git -C D:/Творчество/git-analysis/MariUt005/git-analysis log -p --unified=0 -w --ignore-blank-lines')
-  print(git_diff_cmd, repo_name)
+  #repo_name <- "git-analysis"
+  #git_diff_cmd <- glue('git -C D:/Творчество/git-analysis/MariUt005/git-analysis log -p --unified=0 -w --ignore-blank-lines')
+  #print(git_diff_cmd, repo_name)
   
   
   diff <- system(git_diff_cmd, intern = TRUE)
