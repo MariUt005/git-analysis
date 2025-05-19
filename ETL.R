@@ -9,7 +9,7 @@ library(httr)
 library(jsonlite)
 
 # Подключение к базе данных
-con <- dbConnect(duckdb(), dbdir = "git5.duckdb")
+con <- dbConnect(duckdb(), dbdir = "git24.duckdb")
 if (!dbExistsTable(con, 'repo_path')) {
   dbExecute(con,
             "CREATE TABLE repo_path (
@@ -21,13 +21,13 @@ if (!dbExistsTable(con, 'repo_path')) {
 # 0 - локальный репозиторий
 # 1 - удаленный репозиторий
 # 2 - имя пользователя на github
-mode <- 2
+mode <- 1
 
 # Входные данные
-repo_url <- "https://github. com/tidyverse/ggplot2.git"
+repo_url <- "https://github.com/tidyverse/ggplot2.git"
 repo_local_dir <- "D:/Творчество/git-analysis/ggplot2"
 clone_dir = "D:/Творчество/git-analysis/MariUt005"
-username <- "MariUt005" 
+username <- "gigwrld" 
 token <- NA
 
 
@@ -62,7 +62,7 @@ getGithubRepos <- function(username, token = NULL) {
   repo_links <- sapply(all_repos, function(x) x$clone_url)
   return(repo_links)
 }
-
+print(getGithubRepos(username))
 
 prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
   getUrlRepo <- function(repo_url, repo_name, clone_dir){
@@ -117,7 +117,23 @@ getGitDiff <- function(git_diff_cmd, repo_name) {
   
   diff <- system(git_diff_cmd, intern = TRUE)
   
-  git_diff_df <- data.frame(lines=diff)
+  if (length(diff) == 0 || all(diff == "")) {
+    return(data.frame(
+      commit = character(),
+      src_file = character(),
+      dst_file = character(),
+      start_del = integer(),
+      count_del = integer(),
+      start_add = integer(),
+      count_add = integer(),
+      src = character(),
+      is_add = logical(),
+      repo = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  git_diff_df <- data.frame(lines=diff, stringsAsFactors = FALSE)
   df <- git_diff_df %>%
     filter(!grepl('^Author', lines)) %>%
     filter(!grepl('^Date', lines)) %>%
@@ -132,21 +148,22 @@ getGitDiff <- function(git_diff_cmd, repo_name) {
   res <- df %>% 
     mutate(commit_start = grepl("^commit ", lines)) %>% 
     mutate(commit_id = cumsum(commit_start)) %>% 
-    mutate(commit = if_else(commit_start, stringr::str_replace(lines, "^commit ",""), NA)) %>% 
+    mutate(commit = if_else(commit_start, stringr::str_replace(lines, "^commit ",""), NA_character_)) %>% 
     mutate(src_file = str_sub(stringr::str_extract(lines, "^\\-\\-\\-.*"), 4)) %>% 
     mutate(dst_file = str_sub(stringr::str_extract(lines, "^\\+\\+\\+.*"), 4)) %>% 
     mutate(
-      range = str_match(lines, "-([0-9]+)(?:,([0-9]+))?\\s*\\+([0-9]+)(?:,([0-9]+))?")[,2:5],
-      start_del = as.integer(range[,1]),
-      count_del = ifelse(grepl("^\\@\\@ ", lines), coalesce(as.integer(range[,2]), 1), NA),
-      start_add = as.integer(range[,3]),
-      count_add = ifelse(grepl("^\\@\\@ ", lines), coalesce(as.integer(range[,4]), 1), NA)
+      range = str_match(lines, "-([0-9]+)(?:,([0-9]+))?\\s*\\+([0-9]+)(?:,([0-9]+))?"),
+      start_del = as.integer(range[,2]),
+      count_del = ifelse(grepl("^\\@\\@ ", lines), coalesce(as.integer(range[,3]), 1L), NA_integer_),
+      start_add = as.integer(range[,4]),
+      count_add = ifelse(grepl("^\\@\\@ ", lines), coalesce(as.integer(range[,5]), 1L), NA_integer_)
     ) %>% 
+    select(-range) %>%
     select(lines, commit_start, commit_id, commit, src_file, dst_file, start_del, count_del, start_add, count_add) %>%
     mutate(metaline = !is.na(src_file) | !is.na(dst_file) | !is.na(commit) | !is.na(start_del))  %>% 
     mutate(segment_start = grepl("^\\@\\@ ", lines)) %>% 
     mutate(segment_id = cumsum(segment_start)) %>% 
-    mutate(src_code = if_else(metaline, NA, lines)) %>%
+    mutate(src_code = if_else(metaline, NA_character_, lines)) %>%
     mutate(is_add = ifelse(
       (grepl("^\\+", src_code) | grepl("^\\-", src_code)),
       grepl("^\\+", src_code),
@@ -160,7 +177,7 @@ getGitDiff <- function(git_diff_cmd, repo_name) {
     select(segment_id, src_code, is_add) %>% 
     filter(!is.na(src_code)) %>% 
     group_by(segment_id, is_add) %>% 
-    summarise(src = paste(src_code, collapse = "")) %>%
+    summarise(src = paste(src_code, collapse = ""), .groups = "drop") %>%
     mutate(src = str_replace_all(src, "[^[:alnum:][:punct:]]", "")) %>%
     filter(src != "")
   
@@ -171,9 +188,10 @@ getGitDiff <- function(git_diff_cmd, repo_name) {
   
   res_fill_unique <- unique(res_fill)
   
-  res_src <- left_join(res_fill_unique,src_code_concat, by = "segment_id") %>% 
+  res_src <- left_join(res_fill_unique, src_code_concat, by = "segment_id") %>% 
     select(commit, src_file, dst_file, start_del, count_del, start_add, count_add, src, is_add) %>%
     mutate(repo = repo_name)
+  
   res_src
 }
 
@@ -191,28 +209,45 @@ write2db <- function(repo_name, repo_path) {
     git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
     git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines')
   } else {
-    last_commit <- dbGetQuery(con, glue("SELECT commit
-      FROM (
-        SELECT 
-          commit,
-          ROW_NUMBER() OVER (ORDER BY CAST(SUBSTRING(date, 1, 19) AS TIMESTAMP) DESC) AS rn
-        FROM git_commit_history
-        WHERE repo = '{repo_name}'
-      ) AS ranked
-      WHERE rn = 1;"))$commit
+    last_commit_db <- dbGetQuery(con, glue("
+      SELECT commit FROM git_commit_history 
+      WHERE repo = '{repo_name}' 
+      ORDER BY date DESC LIMIT 1"))$commit
+    
+    first_commit_repo <- system(glue('git -C {repo_path} rev-list --max-parents=0 HEAD'), intern = TRUE)[1]
+    current_head <- system(glue('git -C {repo_path} rev-parse HEAD'), intern = TRUE)
+    if (last_commit_db == current_head) {
+      message("Репозиторий уже актуален, обновление не требуется")
+      return()
+    }
+    
     git_log_cmd <- glue('git -C {repo_path} log {last_commit}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
     git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit}..HEAD --unified=0 -w --ignore-blank-lines')
   }
   git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_name)
-  dbWriteTable(con, "git_commit_history", git_commit_history_df, append = TRUE)
+  if (nrow(git_commit_history_df) > 0) {
+    dbWriteTable(con, "git_commit_history", git_commit_history_df, append = TRUE)
+  }
+
   git_diff_df <- getGitDiff(git_diff_cmd, repo_name)
-  dbWriteTable(con, "git_diff", git_diff_df, append = TRUE)
+  if (nrow(git_diff_df) > 0) {
+    dbWriteTable(con, "git_diff", git_diff_df, append = TRUE)
+  }
   if (is_new) {
     repo_path_df <- data.frame(
       repo = repo_name,
       path = repo_path
     )
     dbWriteTable(con, "repo_path", repo_path_df, append = TRUE)
+  }
+  if (!is_new) {
+    # Удаляем старые данные для этого репозитория перед добавлением новых
+    dbExecute(con, glue("DELETE FROM git_commit_history WHERE repo = '{repo_name}'"))
+    dbExecute(con, glue("DELETE FROM git_diff WHERE repo = '{repo_name}'"))
+    
+    # Теперь получаем полную историю для этого репозитория
+    git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
+    git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines --all')
   }
 }
 
@@ -233,8 +268,11 @@ if (mode == 0) {
   write2db(repo_name, file.path(clone_dir, repo_name))
 } else if (mode == 2) {
   repo_list <- getGithubRepos(username)
-  print(repo_git_list)
-  lapply(repo_git_list, function(x) processElement(x, clone_dir))
+  if (length(repo_list) > 0) {
+    lapply(repo_list, function(x) processElement(x, clone_dir))
+  } else {
+    print("Для данного пользователя не найдено репозиториев")
+  }
 }
 
 test_repo_path <- dbGetQuery(con, "SELECT * FROM repo_path;")
