@@ -1,13 +1,139 @@
+library(shiny)
 library(DBI)
 library(duckdb)
 library(glue)
 library(dplyr)
 library(stringr)
 library(DT) 
+library(ggplot2)
+library(treemap)
+library(plotly)
 library(lubridate)
 library(tidyr)
+library(scales)
+library(RColorBrewer)
+library(tools)
+library(shinydashboard)
 
-
+ui <- fluidPage(
+  tags$head(
+    tags$style(HTML("
+      #loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(255, 255, 255, 0.7);
+        z-index: 9999;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        flex-direction: column;
+      }
+      
+      .spinner {
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        border: 6px solid #f3f3f3;
+        border-top: 6px solid #3498db;
+        animation: spin 1s linear infinite;
+      }
+      
+      .loading-text {
+        margin-top: 20px;
+        font-size: 18px;
+        font-weight: bold;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    "))
+  ),
+  
+  tags$div(
+    id = "loading-overlay",
+    tags$div(class = "spinner"),
+    tags$div(class = "loading-text", "Обработка данных...")
+  ),
+  titlePanel("Анализ GIT-репозиториев"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      radioButtons("mode", "Выберите режим:",
+                   choices = list("Локальный репозиторий" = 0,
+                                  "Удаленный репозиторий" = 1,
+                                  "Имя пользователя на GitHub" = 2)),
+      
+      conditionalPanel(
+        condition = "input.mode == 0",
+        textInput("repo_local_dir", "Путь к локальному репозиторию:", 
+                  placeholder = "D:/examle")
+      ),
+      
+      conditionalPanel(
+        condition = "input.mode == 1",
+        textInput("repo_url", "URL удаленного репозитория с .git:", 
+                  placeholder = "https://github.com/username/example.git"),
+        textInput("clone_dir", "Директория для клонирования:", 
+                  placeholder = "examleDir")
+      ),
+      
+      conditionalPanel(
+        condition = "input.mode == 2",
+        textInput("username", "Имя пользователя GitHub:", 
+                  placeholder = "username"),
+        textInput("clone_dir2", "Директория для клонирования:", 
+                  placeholder = "examleDir"),
+      ),
+      
+      actionButton("submit", "Добавть в базу данных", 
+                   class = "btn-primary", icon = icon("play")),
+      hr(),
+      verbatimTextOutput("status_message")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Авторы", 
+                 DTOutput("author_data"),  
+                 br(),
+                 actionButton("analyze_author", "Анализировать", 
+                              class = "btn-success"),
+                 downloadButton("download_authors", "Скачать данные")),
+        tabPanel("Репозитории", 
+                 DTOutput("repo_data"), 
+                 br(),
+                 actionButton("analyze_repo", "Анализировать", 
+                              class = "btn-success"),
+                 actionButton("delete_repo", "Удалить", class = "btn-danger", icon = icon("trash")),
+                 downloadButton("download_repos", "Скачать данные")),
+        tabPanel("О программе", 
+                 includeMarkdown("README.md"))
+      )
+    )
+  ),
+  tags$script(HTML("
+    function showLoading() {
+      document.getElementById('loading-overlay').style.display = 'flex';
+    }
+    
+    function hideLoading() {
+      document.getElementById('loading-overlay').style.display = 'none';
+    }
+    
+    Shiny.addCustomMessageHandler('show_loading', function(message) {
+      showLoading();
+    });
+    
+    Shiny.addCustomMessageHandler('hide_loading', function(message) {
+      hideLoading();
+    });
+  "))
+)
 
 server <- function(input, output, session) {
   
@@ -28,7 +154,6 @@ server <- function(input, output, session) {
     values$git_commit_history <- dbGetQuery(con, "SELECT * FROM git_commit_history LIMIT 10000")
     values$git_diff <- dbGetQuery(con, "SELECT * FROM git_diff LIMIT 10000")
     
-    # Получаем список уникальных авторов
     if(!is.null(values$git_commit_history) && nrow(values$git_commit_history) > 0) {
       values$authors <- values$git_commit_history %>%
         group_by(author) %>%
@@ -41,6 +166,11 @@ server <- function(input, output, session) {
     dbDisconnect(con, shutdown = TRUE)
   }
   
+  
+  observeEvent(input$submit, {
+    session$sendCustomMessage(type = "show_loading", message = list())
+    values$status <- "Запуск процесса анализа..."
+    
     mode <- as.numeric(input$mode)
     
     temp_script <- tempfile(fileext = ".R")
@@ -124,6 +254,35 @@ server <- function(input, output, session) {
     }
     
     writeLines(script_content, temp_script)
+    
+    future_promise <- future::future({
+      tryCatch({
+        suppressWarnings(suppressMessages(source(temp_script)))
+        return(TRUE)
+      }, error = function(e) {
+        return(FALSE)
+      })
+    })
+    
+    withCallingHandlers(
+      {
+        tryCatch({
+          suppressWarnings(suppressMessages(source(temp_script)))
+          values$status <- "Загрузка успешно завершена"
+          loadData()
+          showNotification("Данные успешно загружены!", type = "message", duration = 5)
+        }, finally = {
+          session$sendCustomMessage(type = "hide_loading", message = list())
+        })
+      }
+    )
+    
+    unlink(temp_script)
+  })
+  
+  output$status_message <- renderText({
+    values$status
+  })
   
   output$repo_data <- renderDT({
     req(values$repo_path)
@@ -150,12 +309,32 @@ server <- function(input, output, session) {
   })
   
   
+  observeEvent(input$delete_repo, {
+    req(values$selected_repo, values$repo_path)
+    
+    showModal(modalDialog(
+      title = paste("Удаление репозитория:", values$selected_repo),
+      size = "m",
+      easyClose = TRUE,
+      "Вы уверены, что хотите удалить репозиторий из базы данных?",
+      footer = tagList(
+        modalButton("Отмена"),
+        actionButton("confirm_delete", "Удалить", class = "btn-danger")
+      )
+    ))
+  })
+  
   observeEvent(input$confirm_delete, {
     req(values$selected_repo, values$repo_path)
     
     repo_info <- values$repo_path %>% 
       filter(repo == values$selected_repo)
     
+    if (nrow(repo_info) == 0) {
+      showNotification("Репозиторий не найден в базе данных", type = "error")
+      removeModal()
+      return()
+    }
     
     con <- dbConnect(duckdb(), dbdir = "git26.duckdb")
     
@@ -177,7 +356,6 @@ server <- function(input, output, session) {
           filter(repo != values$selected_repo)
       }
       
-      # Обновляем список авторов
       if (!is.null(values$git_commit_history) && nrow(values$git_commit_history) > 0) {
         values$authors <- values$git_commit_history %>%
           group_by(author) %>%
@@ -190,10 +368,18 @@ server <- function(input, output, session) {
       } else {
         values$authors <- NULL
       }
+      
+      showNotification("Репозиторий успешно удален из базы данных", type = "message")
+      removeModal()
+      
+    }, error = function(e) {
+      showNotification(paste("Ошибка при удалении:", e$message), type = "error")
+    }, finally = {
+      dbDisconnect(con, shutdown = TRUE)
+    })
   })
   
   
-  # Функция для фильтрации данных по выбранному периоду
   filterDataByDateRange <- function(data, date_range, date_column = "date") {
     if (is.null(date_range)) {
       return(data)
@@ -206,7 +392,6 @@ server <- function(input, output, session) {
       )
   }
   
-  # Функция для создания диаграммы использования языков программирования
   createLanguageUsageChart <- function(git_diff_data, date_range = NULL) {
     if (!is.null(date_range) && !is.null(git_diff_data)) {
       commit_ids <- values$git_commit_history %>%
@@ -226,6 +411,12 @@ server <- function(input, output, session) {
              dst_file != "") %>%
       distinct(dst_file) %>%
       pull(dst_file)
+    
+    if (length(unique_files) == 0) {
+      return(ggplot() + 
+               annotate("text", x = 0, y = 0, label = "Нет данных для отображения") +
+               theme_void())
+    }
     
     extensions <- sapply(unique_files, function(file) {
       if (grepl("\\.", file)) {
@@ -271,9 +462,29 @@ server <- function(input, output, session) {
       } else {
         fill_colors <- brewer.pal(n_lang, "Set3")
       }
+      
+      p <- ggplot(lang_count, aes(x = "", y = count, fill = language)) +
+        geom_bar(stat = "identity", width = 1) +
+        coord_polar("y", start = 0) +
+        geom_text(aes(label = label), position = position_stack(vjust = 0.5)) +
+        labs(title = "Использование языков программирования") +
+        scale_fill_manual(values = fill_colors, name = "Язык") +
+        theme_minimal() +
+        theme(
+          axis.title = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 16)
+        )
+      
+      return(p)
+    } else {
+      return(ggplot() + 
+               annotate("text", x = 0, y = 0, label = "Нет данных для отображения") +
+               theme_void())
+    }
   }
   
-  # Функция для создания treemap репозиториев
   createRepoTreemap <- function(git_diff_data, date_range = NULL) {
     if (!is.null(date_range) && !is.null(git_diff_data)) {
       commit_ids <- values$git_commit_history %>%
@@ -300,10 +511,25 @@ server <- function(input, output, session) {
       } else {
         repo_colors <- brewer.pal(n_repo, "Set3")
       }
+      treemap_plot <- treemap(
+        repo_files,
+        index = "repo",
+        vSize = "files",
+        type = "index",
+        title = "Анализ репозиториев по количеству файлов",
+        fontsize.title = 14,
+        fontsize.labels = 12,
+        palette = repo_colors
+      )
+      
+      return(treemap_plot)
+    } else {
+      plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "")
+      text(0.5, 0.5, "Нет данных для отображения", cex = 1.5)
+      return(NULL)
     }
   }
   
-  # Функция для создания тепловой карты активности
   createActivityHeatmap <- function(commit_data, date_range = NULL) {
     if (!is.null(date_range)) {
       commit_data <- commit_data %>%
@@ -333,10 +559,36 @@ server <- function(input, output, session) {
       group_by(weekday, hour) %>%
       summarise(commits = n(), .groups = "drop") %>%
       complete(weekday, hour, fill = list(commits = 0))
+    
+    plot_ly(
+      heatmap_data,
+      x = ~hour,
+      y = ~weekday,
+      z = ~commits,
+      type = "heatmap",
+      colors = colorRamp(c("#f7fbff", "#4292c6", "#08306b")),
+      hoverinfo = "text",
+      text = ~paste("День:", weekday,
+                    "<br>Час:", hour,
+                    "<br>Коммитов:", commits)
+    ) %>%
+      layout(
+        title = "Тепловая карта активности",
+        xaxis = list(
+          title = "Час дня",
+          tickmode = "array",
+          tickvals = 0:23
+        ),
+        yaxis = list(
+          title = "День недели",
+          autorange = "reversed"
+        ),
+        margin = list(l = 100, r = 50, b = 50, t = 50),
+        font = list(family = "Arial", size = 12)
+      )
   }
   
   
-  # Функция для отображения активных часов по количеству коммитов
   createActiveHoursChart <- function(commit_data, date_range = NULL) {
     if (!is.null(date_range) && !is.null(commit_data)) {
       commit_data <- commit_data %>%
@@ -355,9 +607,40 @@ server <- function(input, output, session) {
         group_by(hour) %>%
         summarise(commits = n(), .groups = "drop") %>%
         mutate(hour_label = paste0(hour, ":00"))
+      
+      p <- plot_ly(
+        hours_data,
+        x = ~factor(hour_label, levels = paste0(0:23, ":00")),
+        y = ~commits,
+        type = "bar",
+        marker = list(color = "steelblue"),
+        hoverinfo = "text",
+        text = ~paste("Час:", hour_label, 
+                      "<br>Количество коммитов:", commits)
+      ) %>%
+        layout(
+          title = "Активность коммитов по часам",
+          xaxis = list(
+            title = "Час дня",
+            tickangle = 45
+          ),
+          yaxis = list(
+            title = "Количество коммитов"
+          ),
+          font = list(family = "Arial", size = 12)
+        )
+      
+      return(p)
+    } else {
+      plot_ly() %>%
+        add_annotations(
+          text = "Нет данных для отображения",
+          showarrow = FALSE,
+          font = list(size = 20)
+        )
+    }
   }
   
-  # Функция для создания диаграммы количества коммитов в репозиториях
   createCommitsByRepoChart <- function(commit_data, date_range = NULL) {
     if (!is.null(date_range) && !is.null(commit_data)) {
       commit_data <- commit_data %>%
@@ -379,6 +662,30 @@ server <- function(input, output, session) {
       } else {
         colors <- brewer.pal(n, "Set3")
       }
+      
+      plot_ly(repo_commits, 
+              x = ~repo, 
+              y = ~commits, 
+              type = "bar",
+              marker = list(color = colors)) %>%
+        layout(
+          title = "Количество коммитов в репозиториях",
+          xaxis = list(
+            title = "",
+            categoryorder = "total descending"
+          ),
+          yaxis = list(title = "Количество коммитов"),
+          margin = list(b = 100),
+          font = list(family = "Arial", size = 12)
+        )
+    } else {
+      plot_ly() %>%
+        add_annotations(
+          text = "Нет данных для отображения",
+          showarrow = FALSE,
+          font = list(size = 20)
+        )
+    }
   }
   
   # Анализ выбранного автора
@@ -388,10 +695,168 @@ server <- function(input, output, session) {
     author_data <- values$git_commit_history %>%
       filter(author == values$selected_author)
     
+    if(nrow(author_data) == 0) {
+      showNotification("Нет данных для выбранного автора", type = "error")
+      return()
+    }
+    
     author_dates <- values$git_commit_history %>%
       filter(author == values$selected_author) %>%
       mutate(date_only = as.Date(substr(date, 1, 10))) %>%
       summarise(min_date = min(date_only), max_date = max(date_only))
+    
+    showModal(modalDialog(
+      title = paste("Анализ:", values$selected_author),
+      size = "l",
+      easyClose = TRUE,
+      
+      fluidRow(
+        column(
+          width = 4,
+          wellPanel(
+            style = "height: 700px;",
+            div(
+              style = "text-align: center;",
+              img(src = paste0("https://github.com/", values$selected_author, ".png"), 
+                  height = 100, width = 100)
+            ),
+            br(),
+            h4("Количество репозиториев"),
+            textOutput("author_repo_count"),
+            hr(),
+            h4("Выбор исследуемого периода"),
+            dateRangeInput("author_date_range", "", 
+                           start = author_dates$min_date, 
+                           end = author_dates$max_date,
+                           min = author_dates$min_date,
+                           max = author_dates$max_date, 
+                           format = "dd.mm.yyyy",
+                           separator = " - "),
+            h4("Статистика:"),
+            fluidRow(
+              valueBoxOutput("total_commits_box", width = 6),
+              valueBoxOutput("avg_commits_box", width = 6)
+            ),
+            fluidRow(
+              valueBoxOutput("common_word_box", width = 6),
+              valueBoxOutput("active_day_box", width = 6)
+            )
+          )
+        ),
+        column(
+          width = 8,
+          tabsetPanel(
+            tabPanel("Использование языков программирования", plotOutput("author_lang_chart", height = "400px")),
+            tabPanel("Анализ репозиториев по количеству файлов", plotOutput("author_treemap", height = "400px")),
+            tabPanel("Тепловая карта", plotlyOutput("author_heatmap", height = "500px")),
+            tabPanel("Количество коммитов в репозитории", plotlyOutput("author_commits_chart", height = "400px")),
+            tabPanel("Активные часы", plotlyOutput("author_active_hours", height = "400px"))
+          )
+        )
+      )
+    ))
+    
+    output$total_commits_box <- renderValueBox({
+      req(values$selected_author)
+      
+      author_data <- values$git_commit_history %>%
+        filter(author == values$selected_author)
+      
+      total_commits <- if(nrow(author_data) > 0) nrow(author_data) else "Нет данных"
+      
+      valueBox(
+        value = tags$div(
+          style = "text-align: center;",
+          tags$div(icon("code"), style = "font-size: 12px; margin-bottom: 5px;"),
+          tags$div(tags$b(total_commits), style = "font-size: 15px; font-weight: bold;")
+        ),
+        subtitle = tags$div(style = "text-align: center;", "коммитов"),
+        width = 6
+      )
+    })
+    
+    output$avg_commits_box <- renderValueBox({
+      req(values$selected_author)
+      
+      author_data <- values$git_commit_history %>%
+        filter(author == values$selected_author)
+      
+      if(nrow(author_data) == 0) {
+        avg_commits_per_day <- "Нет данных"
+      } else {
+        commits_per_day <- author_data %>%
+          mutate(date_only = as.Date(substr(date, 1, 10))) %>%
+          group_by(date_only) %>%
+          summarise(daily_commits = n()) %>%
+          pull(daily_commits)
+        
+        avg_commits_per_day <- if(length(commits_per_day) > 0) round(mean(commits_per_day), 1) else 0
+      }
+      
+      valueBox(
+        value = tags$div(
+          style = "text-align: center;",
+          tags$div(icon("calendar"), style = "font-size: 12px; margin-bottom: 5px;"),
+          tags$div(tags$b(avg_commits_per_day), style = "font-size: 15px; font-weight: bold;")
+        ),
+        subtitle = tags$div(style = "text-align: center;", "коммитов в день"),
+        width = 6
+      )
+    })
+    
+    output$common_word_box <- renderValueBox({
+      req(values$selected_author)
+      
+      author_data <- values$git_commit_history %>%
+        filter(author == values$selected_author)
+      
+      if(nrow(author_data) == 0) {
+        most_common_word <- "Нет данных"
+      } else {
+        words <- unlist(strsplit(tolower(author_data$message), "\\W+"))
+        word_freq <- table(words)
+        word_freq <- word_freq[names(word_freq) != ""] 
+        most_common_word <- if(length(word_freq) > 0) names(which.max(word_freq)) else "Нет данных"
+      }
+      
+      valueBox(
+        value = tags$div(
+          style = "text-align: center;",
+          tags$div(icon("comment"), style = "font-size: 12px; margin-bottom: 5px;"),
+          tags$div(tags$b(most_common_word), style = "font-size: 15px; font-weight: bold;")
+        ),
+        subtitle = tags$div(style = "text-align: center;", "частое слово"),
+        width = 6
+      )
+    })
+    
+    output$active_day_box <- renderValueBox({
+      req(values$selected_author)
+      
+      author_data <- values$git_commit_history %>%
+        filter(author == values$selected_author)
+      
+      if(nrow(author_data) == 0) {
+        most_active_day <- "Нет данных"
+      } else {
+        weekday_activity <- author_data %>%
+          mutate(weekday = weekdays(as.Date(substr(date, 1, 10)))) %>%
+          count(weekday) %>%
+          arrange(desc(n))
+        
+        most_active_day <- if(nrow(weekday_activity) > 0) weekday_activity$weekday[1] else "Нет данных"
+      }
+      
+      valueBox(
+        value = tags$div(
+          style = "text-align: center;",
+          tags$div(icon("star"), style = "font-size: 12px; margin-bottom: 5px;"),
+          tags$div(tags$b(most_active_day), style = "font-size: 15px; font-weight: bold;")
+        ),
+        subtitle = tags$div(style = "text-align: center;", "активный день"),
+        width = 6
+      )
+    })
     
     output$author_repo_count <- renderText({
       author_repos <- values$git_commit_history %>%
@@ -405,7 +870,6 @@ server <- function(input, output, session) {
       input$author_date_range
     })
     
-    # Диаграмма использования языков программирования для автора
     output$author_lang_chart <- renderPlot({
       req(values$git_diff)
       
@@ -419,7 +883,6 @@ server <- function(input, output, session) {
       createLanguageUsageChart(git_diff_filtered, author_date_range())
     })
     
-    # Диаграмма treemap для автора
     output$author_treemap <- renderPlot({
       req(values$git_diff)
       
@@ -433,7 +896,6 @@ server <- function(input, output, session) {
       createRepoTreemap(git_diff_filtered, author_date_range())
     })
     
-    # Тепловая карта активности для автора
     output$author_heatmap <- renderPlotly({
       req(values$git_commit_history)
       
@@ -443,7 +905,6 @@ server <- function(input, output, session) {
       createActivityHeatmap(commit_data_filtered, author_date_range())
     })
     
-    # Столбчатая диаграмма коммитов по репозиториям для автора
     output$author_commits_chart <- renderPlotly({
       req(values$git_commit_history)
       
@@ -453,7 +914,6 @@ server <- function(input, output, session) {
       createCommitsByRepoChart(commit_data_filtered, author_date_range())
     })
     
-    # Диаграмма активных часов для автора
     output$author_active_hours <- renderPlotly({
       req(values$git_commit_history)
       
@@ -474,7 +934,6 @@ server <- function(input, output, session) {
     repo_diff_data <- values$git_diff %>% 
       filter(repo == values$selected_repo)
     
-    # топ-10 авторов
     top_authors <- repo_commits_data %>%
       group_by(author) %>%
       summarise(commits = n()) %>%
@@ -488,6 +947,62 @@ server <- function(input, output, session) {
         min_date = if(n() > 0) min(date) else as.Date(Sys.Date()),
         max_date = if(n() > 0) max(date) else as.Date(Sys.Date())
       )
+    
+    showModal(modalDialog(
+      title = paste("Анализ репозитория:", values$selected_repo),
+      size = "l",
+      easyClose = TRUE,
+      
+      fluidRow(
+        column(
+          width = 3,
+          wellPanel(
+            h4(values$selected_repo),
+            hr(),
+            h4("Выбор участников"),
+            selectizeInput(
+              "repo_authors", 
+              label = NULL,
+              choices = unique(repo_commits_data$author),
+              selected = top_authors,
+              multiple = TRUE,
+              options = list(
+                plugins = list('remove_button', 'drag_drop'),
+                placeholder = 'Поиск по имени...',
+                persist = FALSE,
+                create = TRUE
+              )
+            ),
+            helpText("Начните вводить имя для поиска. Можно выбрать несколько авторов."),
+            hr(),
+            h4("Период исследования"),
+            dateRangeInput(
+              "repo_date_range",
+              label = NULL,
+              start = date_range$min_date,
+              end = date_range$max_date,
+              min = date_range$min_date,
+              max = date_range$max_date, 
+              format = "dd.mm.yyyy",
+              separator = " - "
+            )
+          )
+        ),
+        column(
+          width = 9,
+          tabsetPanel(
+            tabPanel("Вклад участников",
+                     plotlyOutput("repo_contrib_chart", height = "500px")),
+            tabPanel("Типы изменений",
+                     plotlyOutput("repo_changes_chart", height = "500px")),
+            tabPanel("История участия",
+                     plotlyOutput("repo_history_chart", height = "500px")),
+            tabPanel("Коммиты в файлах",
+                     plotOutput("repo_file_tree", height = "500px"))
+          )
+        )
+      )
+    ))
     
     filtered_data <- reactive({
       req(input$repo_authors, input$repo_date_range)
@@ -505,7 +1020,6 @@ server <- function(input, output, session) {
       list(commits = commits_filtered, diff = diff_filtered)
     })
     
-    # Диаграмма вклада участников
     output$repo_contrib_chart <- renderPlotly({
       data <- filtered_data()
       
@@ -525,9 +1039,25 @@ server <- function(input, output, session) {
         left_join(file_types, by = "commit") %>%
         group_by(author, category) %>%
         summarise(count = n(), .groups = "drop")
+      
+      colors <- c("Языки программирования" = "#1f77b4", 
+                  "Документация" = "#ff7f0e", 
+                  "Другое" = "#2ca02c")
+      
+      plot_ly(contrib_data, 
+              x = ~author, 
+              y = ~count, 
+              color = ~category,
+              colors = colors,
+              type = "bar") %>%
+        layout(
+          barmode = "stack",
+          title = "Вклад участников проекта",
+          xaxis = list(title = ""),
+          yaxis = list(title = "Количество коммитов")
+        )
     })
     
-    # Диаграмма типов изменений
     output$repo_changes_chart <- renderPlotly({
       data <- filtered_data()
       
@@ -537,9 +1067,28 @@ server <- function(input, output, session) {
           add = sum(count_add, na.rm = TRUE),
           del = sum(count_del, na.rm = TRUE)
         )
+      
+      plot_ly(changes_data) %>%
+        add_trace(
+          x = ~author, 
+          y = ~add, 
+          name = "Добавлено",
+          type = "bar"
+        ) %>%
+        add_trace(
+          x = ~author, 
+          y = ~del, 
+          name = "Удалено",
+          type = "bar"
+        ) %>%
+        layout(
+          barmode = "group",
+          title = "Типы изменений",
+          xaxis = list(title = ""),
+          yaxis = list(title = "Количество изменений")
+        )
     })
     
-    # График истории участия
     output$repo_history_chart <- renderPlotly({
       data <- filtered_data()
       
@@ -547,9 +1096,20 @@ server <- function(input, output, session) {
         mutate(date = as.Date(substr(date, 1, 10))) %>%
         group_by(date, author) %>%
         summarise(count = n(), .groups = "drop")
+      
+      plot_ly(history_data, 
+              x = ~date, 
+              y = ~count, 
+              color = ~author,
+              type = "scatter",
+              mode = "lines+markers") %>%
+        layout(
+          title = "История участия",
+          xaxis = list(title = "Дата"),
+          yaxis = list(title = "Коммитов в день")
+        )
     })
     
-    # Treemap файлов
     output$repo_file_tree <- renderPlot({
       data <- filtered_data()
       
@@ -557,6 +1117,24 @@ server <- function(input, output, session) {
         group_by(dst_file) %>%
         summarise(commits = n_distinct(commit)) %>% 
         filter(!is.na(dst_file))
+      
+      if(nrow(file_data) > 0) {
+        n_files <- nrow(file_data)
+        if(n_files < 3) {
+          file_colors <- brewer.pal(3, "Set3")[1:n_files]
+        } else {
+          file_colors <- brewer.pal(n_files, "Set3")
+        }
+        treemap(file_data,
+                index = "dst_file",
+                vSize = "commits",
+                title = "Количество коммитов в файлах",
+                palette = file_colors)
+      } else {
+        plot.new()
+        text(0.5, 0.5, "Нет данных для отображения", cex = 1.5)
+      }
+    })
   })
   
   # Скачивание данных
@@ -587,3 +1165,5 @@ server <- function(input, output, session) {
     })
   })
 }
+
+shinyApp(ui = ui, server = server)
