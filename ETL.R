@@ -1,36 +1,3 @@
-library(glue) 
-library(dplyr)
-library(arrow)
-library(tidyr)
-library(stringr)
-library(DBI)
-library(duckdb)
-library(httr)
-library(jsonlite)
-
-# Подключение к базе данных
-con <- dbConnect(duckdb(), dbdir = "git24.duckdb")
-if (!dbExistsTable(con, 'repo_path')) {
-  dbExecute(con,
-            "CREATE TABLE repo_path (
-              repo VARCHAR,
-              path VARCHAR)")
-}
-
-# Режим
-# 0 - локальный репозиторий
-# 1 - удаленный репозиторий
-# 2 - имя пользователя на github
-mode <- 1
-
-# Входные данные
-repo_url <- "https://github.com/tidyverse/ggplot2.git"
-repo_local_dir <- "D:/Творчество/git-analysis/ggplot2"
-clone_dir = "D:/Творчество/git-analysis/MariUt005"
-username <- "gigwrld" 
-token <- NA
-
-
 getGithubRepos <- function(username, token = NULL) {
   base_url <- paste0("https://api.github.com/users/", username, "/repos")
   query <- list(
@@ -62,10 +29,9 @@ getGithubRepos <- function(username, token = NULL) {
   repo_links <- sapply(all_repos, function(x) x$clone_url)
   return(repo_links)
 }
-print(getGithubRepos(username))
 
 prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
-  getUrlRepo <- function(repo_url, repo_name, clone_dir){
+  getUrlRepo <- function(repo_url, repo_name, clone_dir, mode){
     if (missing(clone_dir)) {
       clone_dir <- tempdir()
     }
@@ -92,11 +58,7 @@ prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
   }
 }
 
-# Получить git_commit_history
-getGitCommitHistory <- function(git_log_cmd, repo_name) {
-  #repo_name <- "git-analysis"
-  #git_log_cmd <- glue('git -C D:/Творчество/git-analysis/MariUt005/git-analysis log --format="%H\t%P\t%an\t%ai\t%s" --all')
-  
+getGitCommitHistory <- function(git_log_cmd, repo_id, repo_name) {
   res <- system(git_log_cmd, intern = TRUE)
   git_commit_history <- data.frame(lines=res) %>%
     tidyr::separate(
@@ -104,17 +66,12 @@ getGitCommitHistory <- function(git_log_cmd, repo_name) {
       into = c("commit", "parent_commit", "author", "date", "message"),
       sep = '\t'
     ) %>%
+    mutate(repo_id = repo_id) %>%
     mutate(repo = repo_name)
   git_commit_history
 }
 
-
-getGitDiff <- function(git_diff_cmd, repo_name) {
-  #repo_name <- "git-analysis"
-  #git_diff_cmd <- glue('git -C D:/Творчество/git-analysis/MariUt005/git-analysis log -p --unified=0 -w --ignore-blank-lines')
-  #print(git_diff_cmd, repo_name)
-  
-  
+getGitDiff <- function(git_diff_cmd, repo_id, repo_name) {
   diff <- system(git_diff_cmd, intern = TRUE)
   
   if (length(diff) == 0 || all(diff == "")) {
@@ -190,94 +147,266 @@ getGitDiff <- function(git_diff_cmd, repo_name) {
   
   res_src <- left_join(res_fill_unique, src_code_concat, by = "segment_id") %>% 
     select(commit, src_file, dst_file, start_del, count_del, start_add, count_add, src, is_add) %>%
+    mutate(repo_id = repo_id) %>%
     mutate(repo = repo_name)
   
   res_src
 }
 
-write2db <- function(repo_name, repo_path) {
-  if (!dbExistsTable(con, 'git_commit_history')) {
-    is_new <- TRUE
-  } else {
-    is_new <- !dbGetQuery(con, glue("SELECT EXISTS(
-      SELECT 1 
-      FROM git_commit_history 
-      WHERE repo = '{repo_name}'
-      ) AS has_record;"))$has_record
+get_or_create_repo_id <- function(con, repo_name, repo_path) {
+  # Проверка существующей записи
+  query <- glue_sql(
+    "SELECT id FROM repo_path 
+     WHERE repo = {repo_name} AND path = {repo_path}",
+    .con = con
+  )
+  
+  existing_id <- dbGetQuery(con, query)
+  
+  if (nrow(existing_id) > 0) {
+    return(existing_id$id[1])
   }
+  
+  # Получение максимального ID
+  max_id_query <- "SELECT COALESCE(MAX(id), 0) AS max_id FROM repo_path"
+  max_id <- dbGetQuery(con, max_id_query)$max_id
+  
+  # Создание нового ID
+  new_id <- max_id + 1
+  
+  # Вставка новой записи
+  insert_query <- glue_sql(
+    "INSERT INTO repo_path (id, repo, path) 
+     VALUES ({new_id}, {repo_name}, {repo_path})",
+    .con = con
+  )
+  
+  dbExecute(con, insert_query)
+  new_id
+}
+
+write2db <- function(repo_name, repo_path, con) {
+  #Каким-то образом получить repo_id
+  repo_id <- get_or_create_repo_id(
+    con = con,
+    repo_name = repo_name,
+    repo_path = repo_path
+  )
+  
+  is_new <- !dbGetQuery(con, glue("SELECT EXISTS(
+    SELECT 1 
+    FROM git_commit_history 
+    WHERE repo_id = '{repo_id}'
+    ) AS has_record;"))$has_record
+  print(is_new)
+  print(repo_id)
   if (is_new) {
     git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
     git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines')
   } else {
     last_commit_db <- dbGetQuery(con, glue("
       SELECT commit FROM git_commit_history 
-      WHERE repo = '{repo_name}' 
+      WHERE repo_id = '{repo_id}' 
       ORDER BY date DESC LIMIT 1"))$commit
     
     first_commit_repo <- system(glue('git -C {repo_path} rev-list --max-parents=0 HEAD'), intern = TRUE)[1]
     current_head <- system(glue('git -C {repo_path} rev-parse HEAD'), intern = TRUE)
     if (last_commit_db == current_head) {
-      message("Репозиторий уже актуален, обновление не требуется")
+      message("Репозиторий актуален, обновление не требуется")
       return()
     }
     
     git_log_cmd <- glue('git -C {repo_path} log {last_commit}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
     git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit}..HEAD --unified=0 -w --ignore-blank-lines')
   }
-  git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_name)
+  git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_id, repo_name)
   if (nrow(git_commit_history_df) > 0) {
     dbWriteTable(con, "git_commit_history", git_commit_history_df, append = TRUE)
   }
-
-  git_diff_df <- getGitDiff(git_diff_cmd, repo_name)
+  
+  git_diff_df <- getGitDiff(git_diff_cmd, repo_id, repo_name)
   if (nrow(git_diff_df) > 0) {
     dbWriteTable(con, "git_diff", git_diff_df, append = TRUE)
   }
-  if (is_new) {
-    repo_path_df <- data.frame(
-      repo = repo_name,
-      path = repo_path
-    )
-    dbWriteTable(con, "repo_path", repo_path_df, append = TRUE)
-  }
-  if (!is_new) {
-    # Удаляем старые данные для этого репозитория перед добавлением новых
-    dbExecute(con, glue("DELETE FROM git_commit_history WHERE repo = '{repo_name}'"))
-    dbExecute(con, glue("DELETE FROM git_diff WHERE repo = '{repo_name}'"))
-    
-    # Теперь получаем полную историю для этого репозитория
-    git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
-    git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines --all')
-  }
 }
 
-processElement <- function(repo_url, clone_dir) {
-  repo_name <- str_match(repo_url, ".*/(.+)\\.git$")[, 2]
-  prepareRepo(mode, repo_url, repo_name, clone_dir)
-  print(file.path(clone_dir, repo_name))
-  write2db(repo_name, file.path(clone_dir, repo_name))
-}
-
-if (mode == 0) {
+process_local_repo <- function(repo_local_dir, con, mode) {
   repo_name <- basename(repo_local_dir)
   prepareRepo(mode, repo_local_dir = repo_local_dir)
-  write2db(repo_name, repo_local_dir)
-} else if (mode == 1) {
+  write2db(repo_name, repo_local_dir, con)
+}
+
+process_remote_repo <- function(repo_url, clone_dir, con, mode) {
   repo_name <- str_match(repo_url, ".*/(.+)\\.git$")[, 2]
   prepareRepo(mode, repo_url, repo_name, clone_dir)
-  write2db(repo_name, file.path(clone_dir, repo_name))
-} else if (mode == 2) {
+  write2db(repo_name, file.path(clone_dir, repo_name), con)
+}
+
+processElement <- function(repo_url, clone_dir, con, mode) {
+  repo_name <- str_match(repo_url, ".*/(.+)\\.git$")[, 2]
+  prepareRepo(mode, repo_url, repo_name, clone_dir)
+  write2db(repo_name, file.path(clone_dir, repo_name), con)
+}
+
+process_github_user <- function(username, clone_dir, con, mode) {
   repo_list <- getGithubRepos(username)
   if (length(repo_list) > 0) {
-    lapply(repo_list, function(x) processElement(x, clone_dir))
+    lapply(repo_list, function(x) processElement(x, clone_dir, con, mode))
   } else {
     print("Для данного пользователя не найдено репозиториев")
   }
 }
 
-test_repo_path <- dbGetQuery(con, "SELECT * FROM repo_path;")
-test_git_commit_history <- dbGetQuery(con, "SELECT * FROM git_commit_history;")
-test_git_diff <- dbGetQuery(con, "SELECT * FROM git_diff;")
+validate_dirpath <- function(path, check_exists = TRUE) {
+  # Создаем классы ошибок с наследованием от error и condition
+  error <- function(class, message) {
+    structure(
+      list(message = message),
+      class = c(class, "error", "condition")
+    )
+  }
+  
+  # Проверка типа данных
+  if (!is.character(path)) {
+    stop(error("invalid_type_error", "Путь должен быть строкой"))
+  }
+  
+  # Проверка длины
+  if (length(path) != 1) {
+    stop(error("invalid_length_error", "Путь должен сожержать хотя бы 1 символ"))
+  }
+  
+  # Проверка NA и пустой строки
+  if (is.na(path) || path == "") {
+    stop(error("invalid_value_error", "Путь не может быть пустой строкой"))
+  }
+  
+  # Нормализация пути
+  normalized <- try(normalizePath(path, mustWork = FALSE, winslash = "/"), silent = TRUE)
+  if (inherits(normalized, "try-error")) {
+    stop(error("normalization_error", "Нормализация пути невозможна"))
+  }
+  
+  
+  # Проверка зарезервированных имён (Windows)
+  if (.Platform$OS.type == "windows") {
+    reserved <- c("CON", "PRN", "AUX", "NUL", paste0("COM",1:9), paste0("LPT",1:9))
+    if (toupper(basename(normalized)) %in% toupper(reserved)) {
+      stop(error("reserved_name_error", "Путь использует зарезервированные системой имена"))
+    }
+  }
+  
+  # Проверка существования директории
+  if (check_exists && !dir.exists(normalized)) {
+    stop(error("not_exists_error", "Директория не существует"))
+  }
+  
+  normalized
+}
+
+validate_git_repo <- function(path) {
+  # Вложенные классы ошибок
+  git_error <- function(class, message) {
+    structure(
+      list(message = message, path = path),
+      class = c(class, "git_error", "error", "condition")
+    )
+  }
+  
+  # 1. Проверка валидности пути
+  tryCatch(
+    {
+      normalized_path <- validate_dirpath(path, check_exists = TRUE)
+    },
+    error = function(e) {
+      stop(git_error("invalid_path_error", paste("Invalid path:", e$message)))
+    }
+  )
+  
+  # 2. Проверка наличия .git директории
+  git_dir <- file.path(normalized_path, ".git")
+  if (!dir.exists(git_dir)) {
+    stop(git_error("no_git_dir_error", "Это не Git-репозиторий (отсутствует папка .git)"))
+  }
+  
+  # 3. Проверка через Git CLI
+  tryCatch(
+    {
+      git_status <- system2(
+        "git",
+        c("-C", shQuote(normalized_path), "status"),
+        stdout = NULL,
+        stderr = NULL
+      )
+      
+      if (git_status != 0) {
+        stop(git_error("git_command_error", "Выполнение команды git завершилось с ошибкой"))
+      }
+    },
+    error = function(e) {
+      stop(git_error("git_system_error", paste("Ошибка проверки Git:", e$message)))
+    }
+  )
+  
+  # Возвращаем нормализованный путь при успехе
+  return(normalized_path)
+}
+
+run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA, 
+                             clone_dir = NA, username = NA) {
+  tryCatch({
+    con <- dbConnect(duckdb(), dbdir = "git.duckdb")
+    if (!dbExistsTable(con, "repo_path")) {
+      dbExecute(con,
+                "CREATE TABLE repo_path (
+                  id INTEGER,
+                  repo VARCHAR,
+                  path VARCHAR)")
+    }
+    if (!dbExistsTable(con, "git_commit_history")) {
+      dbExecute(con,
+                "CREATE TABLE git_commit_history (
+                  commit VARCHAR,
+                  parent_commit VARCHAR,
+                  author VARCHAR,
+                  date VARCHAR,
+                  message VARCHAR,
+                  repo VARCHAR,
+                  repo_id INTEGER)")
+    }
+    if (!dbExistsTable(con, "git_diff")) {
+      dbExecute(con,
+                "CREATE TABLE git_diff (
+                  commit VARCHAR,
+                  src_file VARCHAR,
+                  dst_file VARCHAR,
+                  start_del INTEGER,
+                  count_del INTEGER,
+                  start_add INTEGER,
+                  count_add INTEGER,
+                  src VARCHAR,
+                  is_add BOOLEAN,
+                  repo VARCHAR,
+                  repo_id INTEGER)")
+    }
+    # Основная логика обработки
+    if (mode == 0) {
+      validate_dirpath(repo_local_dir)
+      validate_git_repo(repo_local_dir)
+      process_local_repo(repo_local_dir, con, mode)
+    } else if (mode == 1) {
+      validate_dirpath(clone_dir)
+      process_remote_repo(repo_url, clone_dir, con, mode)
+    } else if (mode == 2) {
+      validate_dirpath(clone_dir)
+      process_github_user(username, clone_dir, con, mode)
+    }
+    
+    dbDisconnect(con, shutdown = TRUE)
+    return(list(status = "success", message = "Данные успешно загружены"))
+  }, error = function(e) {
+    return(list(status = "error", message = e$message))
+  })
+}
 
 
-dbDisconnect(con, shutdown = TRUE)
