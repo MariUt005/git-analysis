@@ -14,6 +14,9 @@ library(scales)
 library(RColorBrewer)
 library(tools)
 library(shinydashboard)
+library(arrow)
+library(httr)
+library(jsonlite)
 
 ui <- fluidPage(
   tags$head(
@@ -144,12 +147,13 @@ server <- function(input, output, session) {
     git_diff = NULL,
     authors = NULL,  
     selected_author = NULL,
-    selected_repo = NULL,
+    selected_repo_id = NULL,
+    selected_repo_name = NULL,
     date_range = NULL 
   )
   
   loadData <- function() {
-    con <- dbConnect(duckdb(), dbdir = "git26.duckdb")
+    con <- dbConnect(duckdb(), dbdir = "git.duckdb")
     values$repo_path <- dbGetQuery(con, "SELECT * FROM repo_path")
     values$git_commit_history <- dbGetQuery(con, "SELECT * FROM git_commit_history LIMIT 10000")
     values$git_diff <- dbGetQuery(con, "SELECT * FROM git_diff LIMIT 10000")
@@ -171,113 +175,34 @@ server <- function(input, output, session) {
     session$sendCustomMessage(type = "show_loading", message = list())
     values$status <- "Запуск процесса анализа..."
     
-    mode <- as.numeric(input$mode)
-    
-    temp_script <- tempfile(fileext = ".R")
-    
-    script_content <- 'library(glue) 
-    library(dplyr)
-    library(arrow)
-    library(tidyr)
-    library(stringr)
-    library(DBI)
-    library(duckdb)
-    library(httr)
-    library(jsonlite)
-    
-    con <- dbConnect(duckdb(), dbdir = "git26.duckdb")
-    if (!dbExistsTable(con, "repo_path")) {
-      dbExecute(con,
-                "CREATE TABLE repo_path (
-                  repo VARCHAR,
-                  path VARCHAR)")
-    }
-    if (!dbExistsTable(con, "git_commit_history")) {
-      dbExecute(con,
-                "CREATE TABLE git_commit_history (
-                  commit VARCHAR,
-                  parent_commit VARCHAR,
-                  author VARCHAR,
-                  date VARCHAR,
-                  message VARCHAR,
-                  repo VARCHAR)")
-    }
-    if (!dbExistsTable(con, "git_diff")) {
-      dbExecute(con,
-                "CREATE TABLE git_diff (
-                  commit VARCHAR,
-                  src_file VARCHAR,
-                  dst_file VARCHAR,
-                  start_del INTEGER,
-                  count_del INTEGER,
-                  start_add INTEGER,
-                  count_add INTEGER,
-                  src VARCHAR,
-                  is_add BOOLEAN,
-                  repo VARCHAR)")
-    }
-    
-    mode <- MODE_PLACEHOLDER
-    
-    repo_url <- "REPO_URL_PLACEHOLDER"
-    repo_local_dir <- "REPO_LOCAL_DIR_PLACEHOLDER"
-    clone_dir = "CLONE_DIR_PLACEHOLDER"
-    username <- "USERNAME_PLACEHOLDER" 
-    
-    '
-    
-    etl_file <- readLines("ETL.R")
-    start_idx <- grep("getGithubRepos <- function", etl_file)
-    end_idx <- grep("test_git_diff <- dbGetQuery", etl_file) - 1
-    
-    script_content <- paste0(script_content, 
-                             paste(etl_file[start_idx:end_idx], collapse = "\n"),
-                             "\n\ndbDisconnect(con, shutdown = TRUE)\n")
-    
-    script_content <- gsub("MODE_PLACEHOLDER", mode, script_content)
-    
-    if (mode == 0) {
-      script_content <- gsub("REPO_LOCAL_DIR_PLACEHOLDER", input$repo_local_dir, script_content)
-      script_content <- gsub("REPO_URL_PLACEHOLDER", "NA", script_content)
-      script_content <- gsub("CLONE_DIR_PLACEHOLDER", "NA", script_content)
-      script_content <- gsub("USERNAME_PLACEHOLDER", "NA", script_content)
-    } else if (mode == 1) {
-      script_content <- gsub("REPO_URL_PLACEHOLDER", input$repo_url, script_content)
-      script_content <- gsub("CLONE_DIR_PLACEHOLDER", input$clone_dir, script_content)
-      script_content <- gsub("REPO_LOCAL_DIR_PLACEHOLDER", "NA", script_content)
-      script_content <- gsub("USERNAME_PLACEHOLDER", "NA", script_content)
-    } else if (mode == 2) {
-      script_content <- gsub("USERNAME_PLACEHOLDER", input$username, script_content)
-      script_content <- gsub("CLONE_DIR_PLACEHOLDER", input$clone_dir2, script_content)
-      script_content <- gsub("REPO_URL_PLACEHOLDER", "NA", script_content)
-      script_content <- gsub("REPO_LOCAL_DIR_PLACEHOLDER", "NA", script_content)
-    }
-    
-    writeLines(script_content, temp_script)
-    
-    future_promise <- future::future({
-      tryCatch({
-        suppressWarnings(suppressMessages(source(temp_script)))
-        return(TRUE)
-      }, error = function(e) {
-        return(FALSE)
-      })
-    })
-    
+    # Получаем параметры из UI
+    params <- switch(as.character(input$mode),
+                     "0" = list(mode = 0, repo_local_dir = input$repo_local_dir),
+                     "1" = list(mode = 1, repo_url = input$repo_url, clone_dir = input$clone_dir),
+                     "2" = list(mode = 2, username = input$username, clone_dir = input$clone_dir2)
+    )
+
     withCallingHandlers(
       {
         tryCatch({
-          suppressWarnings(suppressMessages(source(temp_script)))
-          values$status <- "Загрузка успешно завершена"
+          source("ETL.R")
+          result <- do.call(run_etl_pipeline, params)
+          
+          # Обработка результата
+          if (result$status == "success") {
+            values$status <- paste(values$status, "\nАнализ успешно завершен!")
+            showNotification("Данные успешно загружены!", type = "message", duration = 5)
+            loadData()
+          } else {
+            showNotification(glue("\nОшибка: {result$message}"), type = "error", duration = 5)
+          }
           loadData()
-          showNotification("Данные успешно загружены!", type = "message", duration = 5)
+          
         }, finally = {
           session$sendCustomMessage(type = "hide_loading", message = list())
         })
       }
     )
-    
-    unlink(temp_script)
   })
   
   output$status_message <- renderText({
@@ -304,13 +229,14 @@ server <- function(input, output, session) {
   observeEvent(input$repo_data_rows_selected, {
     selected_row <- input$repo_data_rows_selected
     if(length(selected_row) > 0) {
-      values$selected_repo <- values$repo_path$repo[selected_row]
+      values$selected_repo_id <- values$repo_path$id[selected_row]
+      values$selected_repo_name <- values$repo_path$repo[selected_row]
     }
   })
   
   
   observeEvent(input$delete_repo, {
-    req(values$selected_repo, values$repo_path)
+    req(values$selected_repo_id, values$repo_path)
     
     showModal(modalDialog(
       title = paste("Удаление репозитория:", values$selected_repo),
@@ -325,10 +251,10 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$confirm_delete, {
-    req(values$selected_repo, values$repo_path)
+    req(values$selected_repo_id, values$repo_path)
     
     repo_info <- values$repo_path %>% 
-      filter(repo == values$selected_repo)
+      filter(id == values$selected_repo_id)
     
     if (nrow(repo_info) == 0) {
       showNotification("Репозиторий не найден в базе данных", type = "error")
@@ -336,24 +262,24 @@ server <- function(input, output, session) {
       return()
     }
     
-    con <- dbConnect(duckdb(), dbdir = "git26.duckdb")
+    con <- dbConnect(duckdb(), dbdir = "git.duckdb")
     
     tryCatch({
-      dbExecute(con, glue("DELETE FROM git_commit_history WHERE repo = '{values$selected_repo}'"))
-      dbExecute(con, glue("DELETE FROM git_diff WHERE repo = '{values$selected_repo}'"))
-      dbExecute(con, glue("DELETE FROM repo_path WHERE repo = '{values$selected_repo}'"))
+      dbExecute(con, glue("DELETE FROM git_commit_history WHERE repo = '{values$selected_repo_id}'"))
+      dbExecute(con, glue("DELETE FROM git_diff WHERE repo = '{values$selected_repo_id}'"))
+      dbExecute(con, glue("DELETE FROM repo_path WHERE id = '{values$selected_repo_id}'"))
       
       values$repo_path <- values$repo_path %>% 
-        filter(repo != values$selected_repo)
+        filter(id != values$selected_repo_id)
       
       if (!is.null(values$git_commit_history)) {
         values$git_commit_history <- values$git_commit_history %>% 
-          filter(repo != values$selected_repo)
+          filter(repo_id != values$selected_repo_id)
       }
       
       if (!is.null(values$git_diff)) {
         values$git_diff <- values$git_diff %>% 
-          filter(repo != values$selected_repo)
+          filter(repo_id != values$selected_repo_id)
       }
       
       if (!is.null(values$git_commit_history) && nrow(values$git_commit_history) > 0) {
@@ -652,7 +578,7 @@ server <- function(input, output, session) {
     
     if(nrow(commit_data) > 0) {
       repo_commits <- commit_data %>%
-        group_by(repo) %>%
+        group_by(repo_id, repo) %>%
         summarise(commits = n(), .groups = "drop") %>%
         arrange(desc(commits))
       
@@ -861,7 +787,7 @@ server <- function(input, output, session) {
     output$author_repo_count <- renderText({
       author_repos <- values$git_commit_history %>%
         filter(author == values$selected_author) %>%
-        distinct(repo) %>%
+        distinct(repo_id) %>%
         nrow()
       return(as.character(author_repos))
     })
@@ -926,13 +852,13 @@ server <- function(input, output, session) {
   
   # Анализ выбранного репозитория
   observeEvent(input$analyze_repo, {
-    req(values$selected_repo)
+    req(values$selected_repo_id)
     
     repo_commits_data <- values$git_commit_history %>% 
-      filter(repo == values$selected_repo)
+      filter(repo_id == values$selected_repo_id)
     
     repo_diff_data <- values$git_diff %>% 
-      filter(repo == values$selected_repo)
+      filter(repo_id == values$selected_repo_id)
     
     top_authors <- repo_commits_data %>%
       group_by(author) %>%
@@ -949,7 +875,7 @@ server <- function(input, output, session) {
       )
     
     showModal(modalDialog(
-      title = paste("Анализ репозитория:", values$selected_repo),
+      title = paste("Анализ репозитория:", values$selected_repo_name),
       size = "l",
       easyClose = TRUE,
       
@@ -957,7 +883,7 @@ server <- function(input, output, session) {
         column(
           width = 3,
           wellPanel(
-            h4(values$selected_repo),
+            h4(values$selected_repo_name),
             hr(),
             h4("Выбор участников"),
             selectizeInput(
