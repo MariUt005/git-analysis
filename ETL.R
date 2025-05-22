@@ -39,16 +39,18 @@ prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
     }
     dir <- file.path(clone_dir, repo_name)
     if (file.exists(dir)) {
-      git <- glue("git -C {dir} pull {repo_url}")
+      git <- glue("git -C \"{dir}\" pull {repo_url}")
     } else {
-      git <- glue("git clone {repo_url} {dir}")
+      print(repo_url)
+      print(dir)
+      git <- glue("git clone {repo_url} \"{dir}\"")
     }
     system(git)
   }
   
   updateRepo <- function(repo_path) {
     if (file.exists(repo_path)) {
-      git <- glue("git -C {repo_path} pull")
+      git <- glue("git -C '{repo_path}' pull")
       system(git)
     }
   }
@@ -93,14 +95,14 @@ getGitDiff <- function(git_diff_cmd, repo_id, repo_name) {
   
   git_diff_df <- data.frame(lines=diff, stringsAsFactors = FALSE)
   df <- git_diff_df %>%
-    filter(!grepl('^Author', lines)) %>%
-    filter(!grepl('^Date', lines)) %>%
-    filter(!grepl('^ ', lines)) %>%
-    filter(!grepl('^diff', lines)) %>%
-    filter(!grepl('^index', lines)) %>%
-    filter(!grepl('^deleted', lines)) %>%
-    filter(!grepl('^new', lines)) %>%
-    filter(!grepl('^Merge', lines)) %>%
+    filter(!grepl('^Author', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^Date', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^ ', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^diff', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^index', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^deleted', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^new', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^Merge', lines, useBytes = TRUE)) %>%
     filter(lines != "")
   
   res <- df %>% 
@@ -195,22 +197,22 @@ write2db <- function(repo_name, repo_path, con) {
   print(is_new)
   print(repo_id)
   if (is_new) {
-    git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
-    git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines')
+    git_log_cmd <- glue('git -C "{repo_path}" log --format="%H\t%P\t%an\t%ai\t%s" --all')
+    git_diff_cmd <- glue('git -C "{repo_path}" log -p --unified=0 -w --ignore-blank-lines')
   } else {
     last_commit_db <- dbGetQuery(con, glue("
       SELECT commit FROM git_commit_history 
       WHERE repo_id = '{repo_id}' 
       ORDER BY date DESC LIMIT 1"))$commit
     
-    first_commit_repo <- system(glue('git -C {repo_path} rev-list --max-parents=0 HEAD'), intern = TRUE)[1]
-    current_head <- system(glue('git -C {repo_path} rev-parse HEAD'), intern = TRUE)
+    first_commit_repo <- system(glue('git -C "{repo_path}" rev-list --max-parents=0 HEAD'), intern = TRUE)[1]
+    current_head <- system(glue('git -C "{repo_path}" rev-parse HEAD'), intern = TRUE)
     if (last_commit_db == current_head) {
       message("Репозиторий актуален, обновление не требуется")
       return()
     }
-    git_log_cmd <- glue('git -C {repo_path} log {last_commit_db}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
-    git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit_db}..HEAD --unified=0 -w --ignore-blank-lines')
+    git_log_cmd <- glue('git -C "{repo_path}" log {last_commit_db}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
+    git_diff_cmd <- glue('git -C "{repo_path}" log -p {last_commit_db}..HEAD --unified=0 -w --ignore-blank-lines')
   }
   git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_id, repo_name)
   if (nrow(git_commit_history_df) > 0) {
@@ -243,8 +245,6 @@ processElement <- function(repo_url, clone_dir, con, mode) {
 
 process_github_user <- function(username, clone_dir, con, mode) {
   repo_list <- getGithubRepos(username)
-  print("Hello")
-  print(repo_list)
   if (length(repo_list) > 0) {
     lapply(repo_list, function(x) processElement(x, clone_dir, con, mode))
   } else {
@@ -392,7 +392,6 @@ validate_url_availability <- function(url, timeout = 10, follow_redirects = FALS
   if (!grepl("^https?://", url)) {
     stop(http_error("invalid_protocol", "URL должен использовать HTTP/HTTPS"))
   }
-  
   tryCatch(
     {
       response <- GET(
@@ -433,10 +432,7 @@ validate_url_availability <- function(url, timeout = 10, follow_redirects = FALS
         stop(http_error("timeout_error", paste("Timeout:", e$message)))
       } else if (grepl("Could not resolve host", e$message)) {
         stop(http_error("dns_error", "Не удалось выполнить разрешение DNS"))
-      } else {
-        stop(http_error("connection_error", 
-                        paste("Не удалось установить соединение:", e$message)))
-      }
+      } 
     }
   )
 }
@@ -486,6 +482,7 @@ run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA,
     } else if (mode == 1) {
       validate_git_url(repo_url, check_remote = TRUE)
       validate_dirpath(clone_dir)
+      print(repo_url)
       process_remote_repo(repo_url, clone_dir, con, mode)
     } else if (mode == 2) {
       validate_dirpath(clone_dir)
@@ -498,5 +495,3 @@ run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA,
     return(list(status = "error", message = e$message))
   })
 }
-
-
