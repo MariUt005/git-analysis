@@ -209,9 +209,8 @@ write2db <- function(repo_name, repo_path, con) {
       message("Репозиторий актуален, обновление не требуется")
       return()
     }
-    
-    git_log_cmd <- glue('git -C {repo_path} log {last_commit}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
-    git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit}..HEAD --unified=0 -w --ignore-blank-lines')
+    git_log_cmd <- glue('git -C {repo_path} log {last_commit_db}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
+    git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit_db}..HEAD --unified=0 -w --ignore-blank-lines')
   }
   git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_id, repo_name)
   if (nrow(git_commit_history_df) > 0) {
@@ -479,6 +478,7 @@ run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA,
                   repo VARCHAR,
                   repo_id INTEGER)")
     }
+
     if (mode == 0) {
       validate_dirpath(repo_local_dir)
       validate_git_repo(repo_local_dir)
@@ -498,3 +498,5 @@ run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA,
     return(list(status = "error", message = e$message))
   })
 }
+
+
