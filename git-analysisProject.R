@@ -1,22 +1,23 @@
-library(shiny)
-library(DBI)
-library(duckdb)
 library(glue)
-library(dplyr)
 library(stringr)
-library(DT) 
-library(ggplot2)
 library(treemap)
-library(plotly)
-library(lubridate)
-library(tidyr)
 library(scales)
 library(RColorBrewer)
 library(tools)
-library(shinydashboard)
 library(arrow)
 library(httr)
 library(jsonlite)
+library(shiny)
+library(DBI)
+library(dplyr)
+library(duckdb)
+library(ggplot2)
+library(DT)
+library(plotly)
+library(tidyr)
+library(shinydashboard)
+library(lubridate)
+
 
 ui <- fluidPage(
   tags$head(
@@ -56,6 +57,11 @@ ui <- fluidPage(
       }
     "))
   ),
+  tags$script(HTML('
+    Shiny.addCustomMessageHandler("openURL", function(message) {
+      eval(message.url);
+    });
+  ')),
   
   tags$div(
     id = "loading-overlay",
@@ -96,7 +102,9 @@ ui <- fluidPage(
       actionButton("submit", "Добавть в базу данных", 
                    class = "btn-primary", icon = icon("play")),
       hr(),
-      verbatimTextOutput("status_message")
+      verbatimTextOutput("status_message"),
+      actionButton("open_team", "Открыть Team Analysis", 
+                   class = "btn-info", icon = icon("users"))
     ),
     
     mainPanel(
@@ -110,10 +118,10 @@ ui <- fluidPage(
         tabPanel("Репозитории", 
                  DTOutput("repo_data"), 
                  br(),
-                 actionButton("analyze_repo", "Анализировать", 
-                              class = "btn-success"),
+                 actionButton("analyze_repo", "Анализировать", class = "btn-success"),
                  actionButton("delete_repo", "Удалить", class = "btn-danger", icon = icon("trash")),
-                 downloadButton("download_repos", "Скачать данные")),
+                 downloadButton("download_repos", "Скачать данные")
+        ),
         tabPanel("О программе", 
                  includeMarkdown("README.md"))
       )
@@ -171,6 +179,27 @@ server <- function(input, output, session) {
   }
   
   
+  # запуск team.R
+  bg_process <- callr::r_bg(
+    func = function() {
+      shiny::runApp("team.R", port = 3839, launch.browser = FALSE)
+    },
+    supervise = TRUE
+  )
+  
+  # Обработчик для открытия Team Analysis
+  observeEvent(input$open_team, {
+    js_code <- "window.open('http://localhost:3839', '_blank');"
+    session$sendCustomMessage(type = 'openURL', message = list(url = js_code))
+  })
+  
+  # Остановка фонового процесса при закрытии приложения
+  session$onSessionEnded(function() {
+    bg_process$kill()
+  })
+  # конец запуска team.R
+  
+  
   observeEvent(input$submit, {
     session$sendCustomMessage(type = "show_loading", message = list())
     values$status <- "Запуск процесса анализа..."
@@ -181,7 +210,7 @@ server <- function(input, output, session) {
                      "1" = list(mode = 1, repo_url = input$repo_url, clone_dir = input$clone_dir),
                      "2" = list(mode = 2, username = input$username, clone_dir = input$clone_dir2)
     )
-
+    
     withCallingHandlers(
       {
         tryCatch({
