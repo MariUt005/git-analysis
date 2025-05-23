@@ -25,7 +25,7 @@
 
 Обзор проекта от идеи до реализации представлен [здесь](https://github.com/MariUt005/git-analysis/tree/master/presentation) 
 
-Также доступно [видео](https://rutube.ru/video/private/6174721142818cda73c7e5aef46e5531/?p=HfYEhvIuFpIvXeWvMnHSjA) демонстрации работы программы
+Также доступно [видео](https://vk.com/video-230599819_456239017) демонстрации работы программы
 
 ## Как запустить?
 
