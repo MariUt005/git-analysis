@@ -23,6 +23,95 @@ library(shinyjs)
 library(networkD3)
 
 
+scale_0_1 <- function(x) {
+  if(length(unique(x)) <= 1 || (max(x) - min(x)) == 0) return(rep(0.5, length(x)))
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+analyze_dev_productivity <- function(commit_history, diff_data) {
+  commits_summary <- commit_history %>%
+    mutate(date = as.Date(substr(date, 1, 10))) %>%
+    group_by(author) %>%
+    summarise(
+      total_commits = n(),
+      first_commit = min(date),
+      last_commit = max(date),
+      activity_duration = as.numeric(difftime(max(date), min(date), units = "days")) + 1,
+      active_days = n_distinct(date),
+      avg_daily_commits = total_commits / active_days,
+      activity_frequency = active_days / activity_duration
+    )
+  
+  code_changes <- diff_data %>%
+    left_join(commit_history %>% select(commit, author, repo_id), by = c("commit"="commit", "repo_id"="repo_id")) %>%
+    group_by(author) %>%
+    summarise(
+      files_changed = n_distinct(dst_file),
+      lines_added = sum(count_add, na.rm = TRUE),
+      lines_deleted = sum(count_del, na.rm = TRUE),
+      net_contribution = lines_added - lines_deleted
+    )
+  
+  productivity <- commits_summary %>%
+    left_join(code_changes, by = "author") %>%
+    mutate(
+      avg_commit_size = (lines_added + lines_deleted) / total_commits,
+      contribution_per_day = net_contribution / active_days
+    ) %>%
+    filter(total_commits >= 1) 
+  
+  return(productivity)
+}
+
+analyze_dev_expertise <- function(commit_history, diff_data) {
+  language_usage <- diff_data %>%
+    mutate(ext = tolower(tools::file_ext(dst_file)),
+           language = case_when(
+             ext %in% c("py", "ipynb") ~ "Python",
+             ext %in% c("r", "rmd", "qmd") ~ "R",
+             ext %in% c("js", "jsx", "ts", "tsx") ~ "JavaScript/TypeScript",
+             ext %in% c("java") ~ "Java",
+             ext %in% c("c", "cpp", "h", "hpp") ~ "C/C++",
+             ext %in% c("go") ~ "Go",
+             ext %in% c("php") ~ "PHP",
+             ext %in% c("sql") ~ "SQL",
+             ext %in% c("html", "htm") ~ "HTML",
+             ext %in% c("css", "scss", "sass") ~ "CSS",
+             TRUE ~ "Другое"
+           )) %>%
+    left_join(commit_history %>% select(commit, author, repo_id), by = c("commit"="commit", "repo_id"="repo_id")) %>%
+    filter(!is.na(author)) %>%
+    group_by(author, language) %>%
+    summarise(
+      commits = n_distinct(commit),
+      lines = sum(count_add, na.rm = TRUE) + sum(count_del, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  primary_languages <- language_usage %>%
+    group_by(author) %>%
+    arrange(desc(commits)) %>%
+    slice(1) %>%
+    select(author, primary_language = language)
+  
+  expertise_scores <- language_usage %>%
+    group_by(language) %>%
+    mutate(
+      language_commits = scale_0_1(commits),
+      language_lines = scale_0_1(lines),
+      language_score = language_commits * 0.6 + language_lines * 0.4
+    ) %>%
+    group_by(author) %>%
+    summarise(
+      expertise_score = max(language_score),
+      languages = list(language[order(language_score, decreasing = TRUE)])
+    )
+  
+  combined_expertise <- expertise_scores %>%
+    left_join(primary_languages, by = "author")
+  
+  return(combined_expertise)
+}
 
 generate_team_recommendations <- function(commit_history, diff_data, project_requirements) {
   
@@ -128,7 +217,6 @@ generate_team_recommendations <- function(commit_history, diff_data, project_req
     ungroup() %>%
     arrange(desc(total_score))
   
-
   if (project_requirements$type == "fullstack") {
     backend_devs <- team_scoring %>%
       filter(primary_language %in% backend_langs) %>%
@@ -1354,7 +1442,250 @@ server <- function(input, output, session) {
       write.csv(values$authors, file, row.names = FALSE)
     }
   )
-
+  
+  output$top_developers <- renderUI({
+    req(values$git_commit_history, values$git_diff)
+    
+    if(is.null(values$productivity_data)) {
+      values$productivity_data <- analyze_dev_productivity(values$git_commit_history, values$git_diff)
+    }
+    
+    top_devs <- values$productivity_data %>%
+      mutate(
+        experience_score = (log(total_commits + 1) * 0.4) + (scale_0_1(activity_duration) * 0.3) + (scale_0_1(lines_added + lines_deleted) * 0.3),
+        activity_score = (scale_0_1(avg_daily_commits) * 0.6 + scale_0_1(contribution_per_day) * 0.2 + scale_0_1(activity_frequency) * 0.2) * 10,
+        recency_score = scale_0_1(as.numeric(difftime(Sys.Date(), last_commit, units = "days")) * -1 + 100),
+        dev_score = experience_score * 0.4 + activity_score * 0.4 + recency_score * 0.2
+      ) %>%
+      arrange(desc(dev_score)) %>%
+      head(5)
+    
+    
+    dev_cards <- lapply(1:nrow(top_devs), function(i) {
+      dev <- top_devs[i, ]
+      tags$div(
+        class = "developer-card",
+        tags$div(
+          class = "developer-card-header",
+          tags$strong(dev$author),
+          tags$span(class = "score-badge", sprintf("%.1f", dev$dev_score))
+        ),
+        tags$p(
+          sprintf("%d коммитов за %d дней активности", 
+                  dev$total_commits, dev$active_days)
+        ),
+        tags$small(
+          sprintf("Последний коммит: %s", format(as.Date(dev$last_commit), "%d %b %Y"))
+        )
+      )
+    })
+    
+    tagList(dev_cards)
+  })
+  
+  observeEvent(input$generate_recommendations, {
+    req(values$git_commit_history, values$git_diff)
+    
+    values$productivity_data <- analyze_dev_productivity(values$git_commit_history, values$git_diff)
+    
+    project_requirements <- list(
+      estimated_size = input$estimated_size,
+      priority = input$project_priority,
+      type = input$project_type
+    )
+    
+    values$team_recommendations <- generate_team_recommendations(
+      values$git_commit_history, 
+      values$git_diff, 
+      project_requirements
+    )
+    
+    output$recommendations_output <- renderUI({
+      req(values$team_recommendations)
+      
+      team_size <- values$team_recommendations$suggested_team_size
+      top_team <- values$team_recommendations$team_scoring %>%
+        head(team_size)
+      
+      if(!"active_days" %in% names(top_team)) {
+        top_team$active_days <- NA 
+      }
+      
+      tagList(
+        fluidRow(
+          box(
+            title = "Сводные рекомендации", width = 12, status = "primary",
+            tags$div(
+              class = "recommendation-item",
+              tags$h4("Рекомендуемая команда"),
+              tags$p(sprintf("Рекомендуемый размер команды: %d разработчиков", team_size)),
+              tags$p("Ключевые разработчики:"),
+              tags$ul(
+                lapply(1:nrow(top_team), function(i) {
+                  tags$li(
+                    HTML(sprintf(
+                      "<strong>%s</strong> ",
+                      top_team$author[i]
+                    ))
+                  )
+                })
+              )
+            )
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Детальная оценка разработчиков", width = 12, status = "primary",
+            DTOutput("developers_rating_table")
+          )
+        )
+      )
+    })
+    
+    output$developers_rating_table <- renderDT({
+      req(values$team_recommendations)
+      
+      values$team_recommendations$team_scoring %>%
+        select(
+          Разработчик = author,
+          Опыт = experience_score,
+          Активность = activity_score,
+          Регулярность = regularity,
+          `Основной язык` = primary_language,
+          `Кол-во коммитов` = total_commits,
+          `Средний размер коммита` = avg_commit_size,
+          `Итоговая оценка` = total_score
+        ) %>%
+        datatable(options = list(
+          pageLength = 10,
+          scrollX = TRUE,
+          language = list(url = '//cdn.datatables.net/plug-ins/1.10.25/i18n/Russian.json')
+        )) %>%
+        formatRound(columns = c('Опыт', 'Активность', 'Регулярность', 'Итоговая оценка'), digits = 2) %>%
+        formatRound(columns = c('Средний размер коммита'), digits = 0) %>%
+        formatStyle(
+          'Итоговая оценка',
+          background = styleColorBar(c(0, 10), 'lightblue'),
+          backgroundSize = '100% 90%',
+          backgroundRepeat = 'no-repeat',
+          backgroundPosition = 'center'
+        )
+    })
+  })
+  
+  output$collaboration_network <- renderForceNetwork({
+    req(values$git_commit_history, values$git_diff)
+    
+    file_contributions <- values$git_diff %>%
+      left_join(values$git_commit_history %>% select(commit, author, repo_id), by = c("commit"="commit", "repo_id"="repo_id")) %>%
+      filter(!is.na(author)) %>%
+      select(author, dst_file, repo_id) %>%
+      distinct()
+    
+    shared_files <- file_contributions %>%
+      inner_join(file_contributions, by = c("repo_id"="repo_id", "dst_file"="dst_file"), relationship = "many-to-many") %>%
+      filter(author.x != author.y) %>%
+      count(author.x, author.y, name = "weight") %>%
+      filter(weight >= 1 )
+    
+    
+    unique_authors <- unique(c(shared_files$author.x, shared_files$author.y))
+    nodes <- data.frame(
+      id = 0:(length(unique_authors) - 1),
+      name = unique_authors,
+      value = sapply(unique_authors, function(a) {
+        sum(values$git_commit_history$author == a)
+      }),
+      group = 1
+    )
+    
+    id_lookup <- setNames(nodes$id, nodes$name)
+    
+    edges <- shared_files %>%
+      mutate(
+        source = id_lookup[author.x],
+        target = id_lookup[author.y]
+      ) %>%
+      select(source, target, value = weight)
+    
+    forceNetwork(
+      Links = edges, Nodes = nodes,
+      Source = "source", Target = "target",
+      Value = "value", NodeID = "name",
+      Group = "group", opacity = 0.8,
+      linkWidth = JS("function(d) { return Math.sqrt(d.value); }"),
+      Nodesize = "value", radiusCalculation = JS("Math.sqrt(d.nodesize)*2"),
+      linkDistance = 100, charge = -30,
+      fontSize = 12, zoom = TRUE, opacityNoHover = 0.5,
+      colourScale = JS("d3.scaleOrdinal(d3.schemeCategory10);")
+    )
+  })
+  
+  output$project_dynamics <- renderPlotly({
+    req(values$git_commit_history)
+    
+    commits_by_day <- values$git_commit_history %>%
+      mutate(date = as.Date(substr(date, 1, 10))) %>%
+      count(date, name = "commit_count")
+    
+    
+    commits_by_day <- commits_by_day %>% 
+      filter(!is.na(date))
+    date_range <- seq(min(commits_by_day$date), max(commits_by_day$date), by = "day")
+    complete_dates <- data.frame(date = date_range)
+    
+    full_data <- complete_dates %>%
+      left_join(commits_by_day, by = "date") %>%
+      mutate(commit_count = ifelse(is.na(commit_count), 0, commit_count))
+    
+    ma_data <- full_data %>%
+      mutate(
+        ma_7 = zoo::rollmean(commit_count, 7, fill = NA, align = "right"),
+        ma_30 = zoo::rollmean(commit_count, 30, fill = NA, align = "right")
+      )
+    
+    plot_ly() %>%
+      add_trace(
+        data = ma_data,
+        x = ~date,
+        y = ~commit_count,
+        type = "scatter",
+        mode = "markers",
+        name = "Коммиты",
+        marker = list(
+          size = 4,
+          color = "rgba(55, 128, 191, 0.4)",
+          line = list(color = "rgba(55, 128, 191, 0.1)", width = 0.5)
+        ),
+        hoverinfo = "text",
+        text = ~paste("Дата:", date, "<br>Коммиты:", commit_count)
+      ) %>%
+      add_trace(
+        data = ma_data,
+        x = ~date,
+        y = ~ma_7,
+        type = "scatter",
+        mode = "lines",
+        name = "7-дневное среднее",
+        line = list(color = "#1f77b4", width = 2)
+      ) %>%
+      add_trace(
+        data = ma_data,
+        x = ~date,
+        y = ~ma_30,
+        type = "scatter",
+        mode = "lines",
+        name = "30-дневное среднее",
+        line = list(color = "#ff7f0e", width = 2)
+      ) %>%
+      layout(
+        title = "Динамика активности организации",
+        xaxis = list(title = ""),
+        yaxis = list(title = "Количество коммитов"),
+        hovermode = "closest",
+        legend = list(x = 0.1, y = 0.9)
+      )
+  })
   
   observe({
     tryCatch({
