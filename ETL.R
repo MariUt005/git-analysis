@@ -1,5 +1,7 @@
 getGithubRepos <- function(username, token = NULL) {
   base_url <- paste0("https://api.github.com/users/", username, "/repos")
+  validate_url_availability(base_url)
+  
   query <- list(
     type = "all", 
     per_page = 100  
@@ -37,17 +39,16 @@ prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
     }
     dir <- file.path(clone_dir, repo_name)
     if (file.exists(dir)) {
-      git <- glue("git -C {dir} pull {repo_url}")
+      git <- glue("git -C \"{dir}\" pull {repo_url}")
     } else {
-      git <- glue("git clone {repo_url} {dir}")
+      git <- glue("git clone {repo_url} \"{dir}\"")
     }
     system(git)
   }
   
-  # Обновляет репозиторий
   updateRepo <- function(repo_path) {
     if (file.exists(repo_path)) {
-      git <- glue("git -C {repo_path} pull")
+      git <- glue("git -C \"{repo_path}\" pull")
       system(git)
     }
   }
@@ -92,14 +93,14 @@ getGitDiff <- function(git_diff_cmd, repo_id, repo_name) {
   
   git_diff_df <- data.frame(lines=diff, stringsAsFactors = FALSE)
   df <- git_diff_df %>%
-    filter(!grepl('^Author', lines)) %>%
-    filter(!grepl('^Date', lines)) %>%
-    filter(!grepl('^ ', lines)) %>%
-    filter(!grepl('^diff', lines)) %>%
-    filter(!grepl('^index', lines)) %>%
-    filter(!grepl('^deleted', lines)) %>%
-    filter(!grepl('^new', lines)) %>%
-    filter(!grepl('^Merge', lines)) %>%
+    filter(!grepl('^Author', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^Date', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^ ', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^diff', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^index', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^deleted', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^new', lines, useBytes = TRUE)) %>%
+    filter(!grepl('^Merge', lines, useBytes = TRUE)) %>%
     filter(lines != "")
   
   res <- df %>% 
@@ -145,7 +146,7 @@ getGitDiff <- function(git_diff_cmd, repo_id, repo_name) {
   
   res_fill_unique <- unique(res_fill)
   
-  res_src <- left_join(res_fill_unique, src_code_concat, by = "segment_id") %>% 
+  res_src <- left_join(res_fill_unique, src_code_concat, by = "segment_id", relationship = "many-to-many") %>% 
     select(commit, src_file, dst_file, start_del, count_del, start_add, count_add, src, is_add) %>%
     mutate(repo_id = repo_id) %>%
     mutate(repo = repo_name)
@@ -154,7 +155,6 @@ getGitDiff <- function(git_diff_cmd, repo_id, repo_name) {
 }
 
 get_or_create_repo_id <- function(con, repo_name, repo_path) {
-  # Проверка существующей записи
   query <- glue_sql(
     "SELECT id FROM repo_path 
      WHERE repo = {repo_name} AND path = {repo_path}",
@@ -167,14 +167,9 @@ get_or_create_repo_id <- function(con, repo_name, repo_path) {
     return(existing_id$id[1])
   }
   
-  # Получение максимального ID
   max_id_query <- "SELECT COALESCE(MAX(id), 0) AS max_id FROM repo_path"
   max_id <- dbGetQuery(con, max_id_query)$max_id
-  
-  # Создание нового ID
   new_id <- max_id + 1
-  
-  # Вставка новой записи
   insert_query <- glue_sql(
     "INSERT INTO repo_path (id, repo, path) 
      VALUES ({new_id}, {repo_name}, {repo_path})",
@@ -186,7 +181,6 @@ get_or_create_repo_id <- function(con, repo_name, repo_path) {
 }
 
 write2db <- function(repo_name, repo_path, con) {
-  #Каким-то образом получить repo_id
   repo_id <- get_or_create_repo_id(
     con = con,
     repo_name = repo_name,
@@ -198,26 +192,22 @@ write2db <- function(repo_name, repo_path, con) {
     FROM git_commit_history 
     WHERE repo_id = '{repo_id}'
     ) AS has_record;"))$has_record
-  print(is_new)
-  print(repo_id)
   if (is_new) {
-    git_log_cmd <- glue('git -C {repo_path} log --format="%H\t%P\t%an\t%ai\t%s" --all')
-    git_diff_cmd <- glue('git -C {repo_path} log -p --unified=0 -w --ignore-blank-lines')
+    git_log_cmd <- glue("git -C \"{repo_path}\" log --format=\"%H\t%P\t%an\t%ai\t%s\" --all")
+    git_diff_cmd <- glue("git -C \"{repo_path}\" log -p --unified=0 -w --ignore-blank-lines")
   } else {
     last_commit_db <- dbGetQuery(con, glue("
       SELECT commit FROM git_commit_history 
       WHERE repo_id = '{repo_id}' 
       ORDER BY date DESC LIMIT 1"))$commit
     
-    first_commit_repo <- system(glue('git -C {repo_path} rev-list --max-parents=0 HEAD'), intern = TRUE)[1]
-    current_head <- system(glue('git -C {repo_path} rev-parse HEAD'), intern = TRUE)
+    first_commit_repo <- system(glue("git -C \"{repo_path}\" rev-list --max-parents=0 HEAD"), intern = TRUE)[1]
+    current_head <- system(glue("git -C \"{repo_path}\" rev-parse HEAD"), intern = TRUE)
     if (last_commit_db == current_head) {
-      message("Репозиторий актуален, обновление не требуется")
       return()
     }
-    
-    git_log_cmd <- glue('git -C {repo_path} log {last_commit}..HEAD --format="%H\t%P\t%an\t%ai\t%s"')
-    git_diff_cmd <- glue('git -C {repo_path} log -p {last_commit}..HEAD --unified=0 -w --ignore-blank-lines')
+    git_log_cmd <- glue("git -C \"{repo_path}\" log {last_commit_db}..HEAD --format=\"%H\t%P\t%an\t%ai\t%s\"")
+    git_diff_cmd <- glue("git -C \"{repo_path}\" log -p {last_commit_db}..HEAD --unified=0 -w --ignore-blank-lines")
   }
   git_commit_history_df <- getGitCommitHistory(git_log_cmd, repo_id, repo_name)
   if (nrow(git_commit_history_df) > 0) {
@@ -253,12 +243,11 @@ process_github_user <- function(username, clone_dir, con, mode) {
   if (length(repo_list) > 0) {
     lapply(repo_list, function(x) processElement(x, clone_dir, con, mode))
   } else {
-    print("Для данного пользователя не найдено репозиториев")
+    stop(error("repos_not_found", "Для данного пользователя не найдено репозиториев"))
   }
 }
 
 validate_dirpath <- function(path, check_exists = TRUE) {
-  # Создаем классы ошибок с наследованием от error и condition
   error <- function(class, message) {
     structure(
       list(message = message),
@@ -266,29 +255,23 @@ validate_dirpath <- function(path, check_exists = TRUE) {
     )
   }
   
-  # Проверка типа данных
   if (!is.character(path)) {
     stop(error("invalid_type_error", "Путь должен быть строкой"))
   }
   
-  # Проверка длины
   if (length(path) != 1) {
     stop(error("invalid_length_error", "Путь должен сожержать хотя бы 1 символ"))
   }
   
-  # Проверка NA и пустой строки
   if (is.na(path) || path == "") {
     stop(error("invalid_value_error", "Путь не может быть пустой строкой"))
   }
   
-  # Нормализация пути
   normalized <- try(normalizePath(path, mustWork = FALSE, winslash = "/"), silent = TRUE)
   if (inherits(normalized, "try-error")) {
     stop(error("normalization_error", "Нормализация пути невозможна"))
   }
   
-  
-  # Проверка зарезервированных имён (Windows)
   if (.Platform$OS.type == "windows") {
     reserved <- c("CON", "PRN", "AUX", "NUL", paste0("COM",1:9), paste0("LPT",1:9))
     if (toupper(basename(normalized)) %in% toupper(reserved)) {
@@ -296,7 +279,6 @@ validate_dirpath <- function(path, check_exists = TRUE) {
     }
   }
   
-  # Проверка существования директории
   if (check_exists && !dir.exists(normalized)) {
     stop(error("not_exists_error", "Директория не существует"))
   }
@@ -305,7 +287,6 @@ validate_dirpath <- function(path, check_exists = TRUE) {
 }
 
 validate_git_repo <- function(path) {
-  # Вложенные классы ошибок
   git_error <- function(class, message) {
     structure(
       list(message = message, path = path),
@@ -313,7 +294,6 @@ validate_git_repo <- function(path) {
     )
   }
   
-  # 1. Проверка валидности пути
   tryCatch(
     {
       normalized_path <- validate_dirpath(path, check_exists = TRUE)
@@ -323,13 +303,11 @@ validate_git_repo <- function(path) {
     }
   )
   
-  # 2. Проверка наличия .git директории
   git_dir <- file.path(normalized_path, ".git")
   if (!dir.exists(git_dir)) {
     stop(git_error("no_git_dir_error", "Это не Git-репозиторий (отсутствует папка .git)"))
   }
   
-  # 3. Проверка через Git CLI
   tryCatch(
     {
       git_status <- system2(
@@ -348,8 +326,110 @@ validate_git_repo <- function(path) {
     }
   )
   
-  # Возвращаем нормализованный путь при успехе
   return(normalized_path)
+}
+
+validate_git_url <- function(url, check_remote = FALSE) {
+  git_url_error <- function(class, message) {
+    structure(
+      list(message = message, url = url),
+      class = c(class, "git_url_error", "error", "condition")
+    )
+  }
+  
+  if (!is.character(url)) {
+    stop(git_url_error("invalid_type", "URL должен быть строкой"))
+  }
+  if (length(url) != 1 || is.na(url) || url == "") {
+    stop(git_url_error("invalid_value", "Некорректное значение URL"))
+  }
+  
+  if (!grepl("\\.git$", url)) {
+    stop(git_url_error("invalid_extension", "URL должен оканчиваться на .git"))
+  }
+  
+  patterns <- list(
+    https = "^https?://(.+\\.)?github\\.com/[^/]+/[^/]+\\.git$",
+    ssh = "^(git@|ssh://git@)([a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}(:[0-9]+)?(:|/)[^/]+/[^/]+\\.git$",
+    scp = "^[a-zA-Z0-9_-]+@([a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}:.+\\.git$",
+    file = "^(file://)?/.+\\.git$"
+  )
+  
+  if (!any(
+    grepl(patterns$https, url, ignore.case = TRUE),
+    grepl(patterns$ssh, url),
+    grepl(patterns$scp, url),
+    grepl(patterns$file, url)
+  )) {
+    stop(git_url_error("invalid_format", "Некорректный формат Git URL"))
+  }
+  
+  if (check_remote && !grepl("^file://", url)) {
+    exit_code <- system2("git", c("ls-remote", shQuote(url)), 
+                         stdout = NULL, stderr = NULL)
+    
+    if (exit_code != 0) {
+      stop(git_url_error("inaccessible", "Репозиторий недоступен"))
+    }
+  }
+  
+  return(TRUE)
+}
+
+validate_url_availability <- function(url, timeout = 10, follow_redirects = FALSE) {
+  http_error <- function(class, message, status = NULL) {
+    structure(
+      list(message = message, url = url, status_code = status),
+      class = c(class, "http_error", "error", "condition")
+    )
+  }
+  
+  if (!grepl("^https?://", url)) {
+    stop(http_error("invalid_protocol", "URL должен использовать HTTP/HTTPS"))
+  }
+  tryCatch(
+    {
+      response <- GET(
+        url,
+        config = c(
+          config(followlocation = follow_redirects),
+          config(timeout = timeout)
+        ),
+        add_headers("User-Agent" = "R/validate-url"),
+        verb = "HEAD"
+      )
+      
+      status <- status_code(response)
+      
+      if (status >= 400 && status < 500) {
+        stop(http_error("client_error", 
+                        paste("Ошибка клиента:", status, http_status(status)$reason),
+                        status))
+      }
+      
+      if (status >= 500) {
+        stop(http_error("server_error", 
+                        paste("Ошибка сервера:", status, http_status(status)$reason),
+                        status))
+      }
+      
+      if (status >= 300 && status < 400 && !follow_redirects) {
+        stop(http_error("redirect_error", 
+                        paste("Ошибка редиректа. Код:", status),
+                        status))
+      }
+      
+      return(TRUE)
+    },
+    http_error = function(e) stop(e),
+    error = function(e) {
+      if (grepl("Timeout", e$message)) {
+        stop(http_error("timeout_error", paste("Timeout:", e$message)))
+      } else if (grepl("Could not resolve host", e$message)) {
+        stop(http_error("dns_error", "Не удалось выполнить разрешение DNS"))
+      } 
+    }
+  )
 }
 
 run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA, 
@@ -389,12 +469,13 @@ run_etl_pipeline <- function(mode, repo_url = NA, repo_local_dir = NA,
                   repo VARCHAR,
                   repo_id INTEGER)")
     }
-    # Основная логика обработки
+
     if (mode == 0) {
       validate_dirpath(repo_local_dir)
       validate_git_repo(repo_local_dir)
       process_local_repo(repo_local_dir, con, mode)
     } else if (mode == 1) {
+      validate_git_url(repo_url, check_remote = TRUE)
       validate_dirpath(clone_dir)
       process_remote_repo(repo_url, clone_dir, con, mode)
     } else if (mode == 2) {
