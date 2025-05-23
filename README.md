@@ -6,6 +6,10 @@
 
 Руководитель: [i2z1](https://github.com/i2z1)
 
+## Презентация проекта
+
+Обзор проекта от идеи до реализации представлен [здесь](https://github.com/MariUt005/git-analysis/tree/master/presentation) 
+
 ## Как запустить?
 
 ### Требования:
