@@ -38,5 +38,6 @@ shiny::runApp('git-analysisProject.R')
   1. Откройте репозиторий в RStudio
   2. Откройте файл git-analysisProject.R
   3. Нажмите на кнопку Run App в правом верхнем углу панели с кодом
+     
      ![image](https://github.com/user-attachments/assets/75a23ad9-dd30-4355-9809-3ca105cc229e)
 
