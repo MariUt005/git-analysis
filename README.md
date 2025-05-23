@@ -110,16 +110,19 @@ shiny::runApp('git-analysisProject.R')
 
 - Добавление локального репозитория:
   - путь к директории, в которой располагается git-репозиторий
+    
 ![image](https://github.com/user-attachments/assets/c9966a6e-a94f-46fb-ad08-6e29dad0420c)
 
 - Добавление удаленного репозитория:
   - URL удаленного репозитория представляет собой ссылку для клонирования репозитория с удаленного хостинга
   - путь к директории, в которую будет склонирован git-репозиторий
+    
 ![image](https://github.com/user-attachments/assets/47872efc-1fb3-4a24-ae61-a0752c6474ab)
 
 - Добавление всех репозиториев пользователя:
   - Имя пользователя на сайте github.com
   - путь к директории, в которую будут склонированы git-репозитории
+    
 ![image](https://github.com/user-attachments/assets/aa46f647-2c6b-4797-a34c-23285b744655)
 
 ### Удаление репозитория из базы данных
@@ -149,13 +152,16 @@ shiny::runApp('git-analysisProject.R')
 Появится всплывающее окно. В левой части представлены фильтры:
 - Авторы - участники команды, работающей над проектом
 - Период - даты с-по для уточнения временного интервала анализа. По умолчанию выбран весь доступный период.
+  
 ![image](https://github.com/user-attachments/assets/303897c7-a14b-44b8-9051-b697df6052cb)
 
 Пользователю доступны следующие графики для анализа:
 - Вклад участников
+  
 ![image](https://github.com/user-attachments/assets/71a7d334-c92b-4ab0-8172-e9808b73434b)
 
 - Типы изменений
+  
 ![image](https://github.com/user-attachments/assets/03305a0c-0f83-43f3-acaa-c79dd5febaa2)
 
 - История участия
@@ -163,6 +169,7 @@ shiny::runApp('git-analysisProject.R')
 ![image](https://github.com/user-attachments/assets/492e0d1c-d64d-431b-be75-6ecaaa8404b7)
 
 - Коммиты в файлах
+  
 ![image](https://github.com/user-attachments/assets/9bcb9468-d7ce-4763-be46-d80f98bfd75a)
 
 Для закрытия этого окна нужно нажать на кнопку "Dismiss" или кликнуть на затемненной области за пределами всплывающего окна в рамках интерфейса программы.
@@ -190,16 +197,21 @@ shiny::runApp('git-analysisProject.R')
 
 Пользователю доступны следующие крафики для анализа:
 - Использование языков программирования
+  
 ![image](https://github.com/user-attachments/assets/7cc63ac0-8265-4543-a7d8-1cfcaffc3885)
 
 - Анализ репозиториев по количеству файлов
+  
 ![image](https://github.com/user-attachments/assets/b2ab370d-a78b-4a2a-ab65-8b7e2573ac46)
 
 - Тепловая карта
+  
 ![image](https://github.com/user-attachments/assets/292551fd-039b-4bca-b6ff-c4a8c133b8c7)
 
 - Коммиты в репозиториях
+  
 ![image](https://github.com/user-attachments/assets/8c64999b-7ba0-445f-b780-ffdd390652c5)
 
 - Активные часы
+
 ![image](https://github.com/user-attachments/assets/afad02d5-ef44-4d56-b3b8-bc7d94b3aef6)
