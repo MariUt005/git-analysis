@@ -1,141 +1,403 @@
 library(shiny)
-library(DBI)
-library(duckdb)
-library(glue)
-library(dplyr)
-library(stringr)
-library(DT) 
-library(ggplot2)
-library(treemap)
-library(plotly)
-library(lubridate)
-library(tidyr)
-library(scales)
-library(RColorBrewer)
-library(tools)
 library(shinydashboard)
+library(DT)
+library(dplyr)
+library(plotly)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(treemap)
+library(glue)
+library(tools)
 library(arrow)
 library(httr)
 library(jsonlite)
+library(DBI)
+library(duckdb)
+library(visNetwork)
+library(lubridate)
+library(purrr)
+library(stringr)
+library(igraph)
+library(shinyjs)
+library(networkD3)
 
-ui <- fluidPage(
-  tags$head(
-    tags$style(HTML("
-      #loading-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(255, 255, 255, 0.7);
-        z-index: 9999;
-        display: none;
-        justify-content: center;
-        align-items: center;
-        flex-direction: column;
-      }
-      
-      .spinner {
-        width: 80px;
-        height: 80px;
-        border-radius: 50%;
-        border: 6px solid #f3f3f3;
-        border-top: 6px solid #3498db;
-        animation: spin 1s linear infinite;
-      }
-      
-      .loading-text {
-        margin-top: 20px;
-        font-size: 18px;
-        font-weight: bold;
-      }
-      
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-    "))
-  ),
+
+
+generate_team_recommendations <- function(commit_history, diff_data, project_requirements) {
   
-  tags$div(
-    id = "loading-overlay",
-    tags$div(class = "spinner"),
-    tags$div(class = "loading-text", "Обработка данных...")
-  ),
-  titlePanel("Анализ GIT-репозиториев"),
+  productivity <- analyze_dev_productivity(commit_history, diff_data)
   
-  sidebarLayout(
-    sidebarPanel(
-      radioButtons("mode", "Выберите режим:",
-                   choices = list("Локальный репозиторий" = 0,
-                                  "Удаленный репозиторий" = 1,
-                                  "Имя пользователя на GitHub" = 2)),
+  languages_expertise <- diff_data %>%
+    mutate(ext = tolower(tools::file_ext(dst_file)),
+           language = case_when(
+             ext %in% c("py", "ipynb") ~ "Python",
+             ext %in% c("r", "rmd", "qmd") ~ "R",
+             ext %in% c("js", "jsx", "ts", "tsx") ~ "JavaScript/TypeScript",
+             ext %in% c("java") ~ "Java",
+             ext %in% c("c", "cpp", "h", "hpp") ~ "C/C++",
+             ext %in% c("go") ~ "Go",
+             ext %in% c("rb") ~ "Ruby",
+             ext %in% c("php") ~ "PHP",
+             ext %in% c("sql") ~ "SQL",
+             ext %in% c("html", "htm") ~ "HTML",
+             ext %in% c("css", "scss", "sass") ~ "CSS",
+             ext %in% c("md", "docx", "txt", "tex") ~ "Документация",
+             TRUE ~ NA_character_
+           )) %>%
+    filter(!is.na(language)) %>%
+    left_join(commit_history %>% select(commit, author, repo_id), by = c("commit"="commit", "repo_id"="repo_id")) %>%
+    group_by(author, language) %>%
+    summarise(
+      commits = n_distinct(commit),
+      lines = sum(count_add, na.rm = TRUE) + sum(count_del, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    group_by(language) %>%
+    mutate(
+      score = scale_0_1(commits) * 0.7 + scale_0_1(lines) * 0.3
+    ) %>%
+    ungroup()
+  
+  backend_langs <- c("Python", "R", "Java", "C/C++", "Go", "Ruby", "PHP", "SQL")
+  frontend_langs <- c("JavaScript/TypeScript", "HTML", "CSS")
+  docs_langs <- c("Документация", "R", "rmd", "qmd", "md", "docx", "txt", "tex")
+  
+  if (project_requirements$type == "backend") {
+    languages_expertise <- languages_expertise %>%
+      filter(language %in% backend_langs)
+  } else if (project_requirements$type == "frontend") {
+    languages_expertise <- languages_expertise %>%
+      filter(language %in% frontend_langs)
+  } else if (project_requirements$type == "docs") {
+    languages_expertise <- languages_expertise %>%
+      filter(language %in% docs_langs)
+  }
+  
+  primary_languages <- languages_expertise %>%
+    group_by(author) %>%
+    arrange(desc(score)) %>%
+    slice(1) %>%
+    ungroup() %>%
+    select(author, primary_language = language, primary_language_score = score)
+  
+  
+  languages_used <- languages_expertise %>%
+    filter(score > 0.3) %>%  
+    group_by(author) %>%
+    summarise(languages = paste(language, collapse = ", "))
+  
+  
+  regularity <- commit_history %>%
+    mutate(date = as.Date(substr(date, 1, 10))) %>%
+    group_by(author) %>%
+    summarise(
+      first_commit = min(date),
+      last_commit = max(date),
+      active_period = as.numeric(difftime(max(date), min(date), units = "days")) + 1,
+      active_days = n_distinct(date),
+      regularity = active_days / active_period,
+      recency_score = scale_0_1(as.numeric(difftime(Sys.Date(), last_commit, units = "days")) * -1 + 100)
+    )
+  
+  team_scoring <- productivity %>%
+    left_join(primary_languages, by = "author") %>%
+    left_join(languages_used, by = "author") %>%
+    left_join(regularity, by = "author") %>%
+    rowwise() %>%
+    mutate(
       
-      conditionalPanel(
-        condition = "input.mode == 0",
-        textInput("repo_local_dir", "Путь к локальному репозиторию:", 
-                  placeholder = "D:/examle")
-      ),
+      experience_score = (log(total_commits + 1) * 0.4) + (scale_0_1(activity_duration) * 0.3) + (scale_0_1(lines_added + lines_deleted) * 0.3),
       
-      conditionalPanel(
-        condition = "input.mode == 1",
-        textInput("repo_url", "URL удаленного репозитория с .git:", 
-                  placeholder = "https://github.com/username/example.git"),
-        textInput("clone_dir", "Директория для клонирования:", 
-                  placeholder = "examleDir")
-      ),
       
-      conditionalPanel(
-        condition = "input.mode == 2",
-        textInput("username", "Имя пользователя GitHub:", 
-                  placeholder = "username"),
-        textInput("clone_dir2", "Директория для клонирования:", 
-                  placeholder = "examleDir"),
-      ),
+      activity_score = (scale_0_1(avg_daily_commits) * 0.6 + 
+                          scale_0_1(contribution_per_day) * 0.2 + 
+                          regularity * 0.2) * 10,
       
-      actionButton("submit", "Добавть в базу данных", 
-                   class = "btn-primary", icon = icon("play")),
-      hr(),
-      verbatimTextOutput("status_message")
-    ),
-    
-    mainPanel(
-      tabsetPanel(
-        tabPanel("Авторы", 
-                 DTOutput("author_data"),  
-                 br(),
-                 actionButton("analyze_author", "Анализировать", 
-                              class = "btn-success"),
-                 downloadButton("download_authors", "Скачать данные")),
-        tabPanel("Репозитории", 
-                 DTOutput("repo_data"), 
-                 br(),
-                 actionButton("analyze_repo", "Анализировать", 
-                              class = "btn-success"),
-                 actionButton("delete_repo", "Удалить", class = "btn-danger", icon = icon("trash")),
-                 downloadButton("download_repos", "Скачать данные")),
-        tabPanel("О программе", 
-                 includeMarkdown("README.md"))
+      
+      total_score = case_when(
+        project_requirements$priority == "experience" ~ 
+          experience_score * 0.8 + activity_score * 0.1 + recency_score * 0.1,
+        project_requirements$priority == "stability" ~ 
+          experience_score * 0.3 + activity_score * 0.2 + regularity * 10 * 0.5,
+        project_requirements$priority == "speed" ~ 
+          experience_score * 0.3 + activity_score * 0.6 + recency_score * 0.1,
+        TRUE ~ experience_score * 0.4 + activity_score * 0.4 + recency_score * 0.2
       )
+    ) %>%
+    ungroup() %>%
+    arrange(desc(total_score))
+  
+  
+  if (project_requirements$type == "fullstack") {
+    backend_devs <- team_scoring %>%
+      filter(primary_language %in% backend_langs) %>%
+      head(1)
+    
+    frontend_devs <- team_scoring %>%
+      filter(primary_language %in% frontend_langs) %>%
+      head(1)
+    
+    other_devs <- team_scoring %>%
+      filter(!(author %in% c(backend_devs$author, frontend_devs$author))) %>%
+      head(max(3, project_requirements$suggested_team_size - 2))
+    
+    team_scoring <- bind_rows(backend_devs, frontend_devs, other_devs) %>%
+      arrange(desc(total_score))
+  }
+  
+  language_experts <- languages_expertise %>%
+    filter(score > 0.7) %>%  
+    group_by(language) %>%
+    top_n(3, score) %>%
+    summarise(top_experts = list(author[order(score, decreasing = TRUE)])) %>%
+    rowwise() %>%
+    mutate(top_experts = paste(unlist(top_experts), collapse = ", "))
+  
+  suggested_team_size <- min(
+    max(3, ceiling(project_requirements$estimated_size / 50)),  
+    max(2, floor(sqrt(project_requirements$estimated_size))),   
+    nrow(team_scoring) 
+  )
+  
+  list(
+    team_scoring = team_scoring,
+    language_experts = language_experts,
+    suggested_team_size = suggested_team_size,
+    productivity = productivity
+  )
+}
+
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Git Repository Analysis"),
+  
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Репозитории", tabName = "repos", icon = icon("code-branch")),
+      menuItem("Авторы", tabName = "authors", icon = icon("user")),
+      #menuItem("Анализ", tabName = "analysis", icon = icon("chart-line")),
+      menuItem("Обзор организации", tabName = "overview", icon = icon("code-branch")),
+      menuItem("Рекомендации", tabName = "recommendations", icon = icon("lightbulb")),
+      menuItem("О программе", tabName = "about", icon = icon("info-circle"))
     )
   ),
-  tags$script(HTML("
-    function showLoading() {
-      document.getElementById('loading-overlay').style.display = 'flex';
-    }
-    
-    function hideLoading() {
-      document.getElementById('loading-overlay').style.display = 'none';
-    }
-    
-    Shiny.addCustomMessageHandler('show_loading', function(message) {
-      showLoading();
-    });
-    
-    Shiny.addCustomMessageHandler('hide_loading', function(message) {
-      hideLoading();
-    });
-  "))
+  
+  dashboardBody(
+    useShinyjs(),
+    tags$head(
+      tags$style(HTML("
+        .small-box {margin-bottom: 15px;}
+        .recommendation-item {
+          background: #f8f9fa;
+          padding: 15px;
+          border-radius: 5px;
+          margin-bottom: 20px;
+          border-left: 4px solid #3c8dbc;
+        }
+        .recommendation-item h4 {
+          margin-top: 0;
+          color: #3c8dbc;
+        }
+        .text-warning {
+          color: #f39c12;
+        }
+        .developer-card {
+          padding: 10px;
+          margin-bottom: 10px;
+          background: #f4f6f9;
+          border-radius: 3px;
+          box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+        }
+        .developer-card-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 5px;
+          border-bottom: 1px solid #e9ecef;
+          padding-bottom: 5px;
+        }
+        .score-badge {
+          background: #3c8dbc;
+          color: white;
+          padding: 2px 6px;
+          border-radius: 3px;
+          font-weight: bold;
+        }
+        #loading-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background-color: rgba(255, 255, 255, 0.7);
+          z-index: 9999;
+          display: none;
+          justify-content: center;
+          align-items: center;
+          flex-direction: column;
+        }
+        .spinner {
+          width: 80px;
+          height: 80px;
+          border-radius: 50%;
+          border: 6px solid #f3f3f3;
+          border-top: 6px solid #3498db;
+          animation: spin 1s linear infinite;
+        }
+        .loading-text {
+          margin-top: 20px;
+          font-size: 18px;
+          font-weight: bold;
+        }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      "))
+    ),
+    tags$div(
+      id = "loading-overlay",
+      tags$div(class = "spinner"),
+      tags$div(class = "loading-text", "Обработка данных...")
+    ),
+    tabItems(
+      tabItem(tabName = "repos",
+              fluidRow(
+                box(
+                  title = "Добавить репозиторий", width = 12, status = "primary",
+                  radioButtons("mode", "Выберите режим:",
+                               choices = list("Локальный репозиторий" = 0,
+                                              "Удаленный репозиторий" = 1,
+                                              "Имя пользователя GitHub" = 2),
+                               inline = TRUE),
+                  
+                  conditionalPanel(
+                    condition = "input.mode == 0",
+                    textInput("repo_local_dir", "Путь к локальному репозиторию:", 
+                              placeholder = "D:/examle")
+                  ),
+                  
+                  conditionalPanel(
+                    condition = "input.mode == 1",
+                    textInput("repo_url", "URL удаленного репозитория с .git:", 
+                              placeholder = "https://github.com/username/example.git"),
+                    textInput("clone_dir", "Директория для клонирования:", 
+                              placeholder = "examleDir")
+                  ),
+                  
+                  conditionalPanel(
+                    condition = "input.mode == 2",
+                    textInput("username", "Имя пользователя GitHub:", 
+                              placeholder = "username"),
+                    textInput("clone_dir2", "Директория для клонирования:", 
+                              placeholder = "examleDir")
+                  ),
+                  
+                  actionButton("submit", "Добавить в базу данных", 
+                               class = "btn-primary", icon = icon("play")),
+                  hr(),
+                  verbatimTextOutput("status_message")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Список репозиториев", width = 12, status = "primary",
+                  DTOutput("repo_data"),
+                  br(),
+                  actionButton("analyze_repo", "Анализировать", class = "btn-success"),
+                  actionButton("delete_repo", "Удалить", class = "btn-danger", icon = icon("trash")),
+                  downloadButton("download_repos", "Скачать данные")
+                )
+              )
+      ),
+      
+      tabItem(tabName = "authors",
+              fluidRow(
+                box(
+                  title = "Список авторов", width = 12, status = "primary",
+                  DTOutput("author_data"),
+                  br(),
+                  actionButton("analyze_author", "Анализировать", class = "btn-success"),
+                  downloadButton("download_authors", "Скачать данные")
+                )
+              )
+      ),
+      
+      tabItem(tabName = "overview",
+              fluidRow(
+                box(
+                  title = "Обзор активности проекта", width = 12, status = "primary",
+                  plotlyOutput("project_dynamics", height = "300px")
+                )
+              ),
+              fluidRow(
+                column(width = 4,
+                       box(title = "Лучшие разработчики", width = NULL, status = "primary",
+                           uiOutput("top_developers")
+                       )
+                ),
+                column(width = 8,
+                       box(title = "Сеть взаимодействия разработчиков", width = NULL, status = "primary",
+                           forceNetworkOutput("collaboration_network", height = "500px")
+                       )
+                )
+              )
+      ),
+      tabItem(tabName = "recommendations",
+              fluidRow(
+                box(
+                  title = "Параметры проекта", width = 12, status = "primary",
+                  column(width = 4,
+                         numericInput("estimated_size", "Примерный размер проекта (KLOC):", 50, min = 1, max = 1000)
+                  ),
+                  column(width = 4,
+                         selectInput("project_priority", "Приоритет проекта:",
+                                     choices = c("Опыт" = "experience", 
+                                                 "Скорость разработки" = "speed", 
+                                                 "Стабильность" = "stability", 
+                                                 "Баланс" = "balanced")),
+                         selectInput("project_type", "Тип проекта:",
+                                     choices = c("Backend" = "backend",
+                                                 "Frontend" = "frontend", 
+                                                 "Fullstack" = "fullstack",
+                                                 "Документация" = "docs"))
+                  ),
+                  column(width = 4,
+                         actionButton("generate_recommendations", "Сформировать рекомендации", 
+                                      class = "btn-primary", style = "margin-top: 25px;")
+                  )
+                )
+              ),
+              fluidRow(
+                uiOutput("recommendations_output")
+              )
+      ),
+      tabItem(tabName = "about",
+              box(
+                title = "О программе", width = 12, status = "primary",
+                includeMarkdown("README.md")
+              )
+      )
+    ),
+    tags$script(HTML("
+      function showLoading() {
+        document.getElementById('loading-overlay').style.display = 'flex';
+      }
+      
+      function hideLoading() {
+        document.getElementById('loading-overlay').style.display = 'none';
+      }
+      
+      Shiny.addCustomMessageHandler('show_loading', function(message) {
+        showLoading();
+      });
+      
+      Shiny.addCustomMessageHandler('hide_loading', function(message) {
+        hideLoading();
+      });
+    "))
+  )
 )
 
 server <- function(input, output, session) {
@@ -149,7 +411,9 @@ server <- function(input, output, session) {
     selected_author = NULL,
     selected_repo_id = NULL,
     selected_repo_name = NULL,
-    date_range = NULL 
+    date_range = NULL,
+    productivity_data = NULL,
+    team_recommendations = NULL
   )
   
   loadData <- function() {
@@ -157,6 +421,13 @@ server <- function(input, output, session) {
     values$repo_path <- dbGetQuery(con, "SELECT * FROM repo_path")
     values$git_commit_history <- dbGetQuery(con, "SELECT * FROM git_commit_history LIMIT 10000")
     values$git_diff <- dbGetQuery(con, "SELECT * FROM git_diff LIMIT 10000")
+    dbDisconnect(con)
+    
+    values$git_commit_history <- values$git_commit_history %>%
+      mutate(date = as.character(date))
+    
+    updateSelectInput(session, "developer_forecast_select", 
+                      choices = unique(values$git_commit_history$author))
     
     if(!is.null(values$git_commit_history) && nrow(values$git_commit_history) > 0) {
       values$authors <- values$git_commit_history %>%
@@ -167,6 +438,7 @@ server <- function(input, output, session) {
                   .groups = "drop")
     }
     
+    
     dbDisconnect(con, shutdown = TRUE)
   }
   
@@ -175,20 +447,18 @@ server <- function(input, output, session) {
     session$sendCustomMessage(type = "show_loading", message = list())
     values$status <- "Запуск процесса анализа..."
     
-    # Получаем параметры из UI
     params <- switch(as.character(input$mode),
                      "0" = list(mode = 0, repo_local_dir = input$repo_local_dir),
                      "1" = list(mode = 1, repo_url = input$repo_url, clone_dir = input$clone_dir),
                      "2" = list(mode = 2, username = input$username, clone_dir = input$clone_dir2)
     )
-
+    
     withCallingHandlers(
       {
         tryCatch({
           source("ETL.R")
           result <- do.call(run_etl_pipeline, params)
           
-          # Обработка результата
           if (result$status == "success") {
             values$status <- paste(values$status, "\nАнализ успешно завершен!")
             showNotification("Данные успешно загружены!", type = "message", duration = 5)
@@ -675,7 +945,7 @@ server <- function(input, output, session) {
             tabPanel("Использование языков программирования", plotOutput("author_lang_chart", height = "400px")),
             tabPanel("Анализ репозиториев по количеству файлов", plotOutput("author_treemap", height = "400px")),
             tabPanel("Тепловая карта", plotlyOutput("author_heatmap", height = "500px")),
-            tabPanel("Количество коммитов в репозитории", plotlyOutput("author_commits_chart", height = "400px")),
+            tabPanel("Коммиты в репозиториях", plotlyOutput("author_commits_chart", height = "400px")),
             tabPanel("Активные часы", plotlyOutput("author_active_hours", height = "400px"))
           )
         )
@@ -873,6 +1143,8 @@ server <- function(input, output, session) {
         min_date = if(n() > 0) min(date) else as.Date(Sys.Date()),
         max_date = if(n() > 0) max(date) else as.Date(Sys.Date())
       )
+    
+    
     
     showModal(modalDialog(
       title = paste("Анализ репозитория:", values$selected_repo_name),
@@ -1082,6 +1354,7 @@ server <- function(input, output, session) {
       write.csv(values$authors, file, row.names = FALSE)
     }
   )
+  
   
   observe({
     tryCatch({
