@@ -1,5 +1,6 @@
 library(shiny)
 library(shinydashboard)
+library(shinyjs)
 library(DT)
 library(dplyr)
 library(plotly)
@@ -9,18 +10,16 @@ library(RColorBrewer)
 library(treemap)
 library(glue)
 library(tools)
-library(arrow)
 library(httr)
-library(jsonlite)
 library(DBI)
 library(duckdb)
-library(visNetwork)
-library(lubridate)
-library(purrr)
 library(stringr)
-library(igraph)
-library(shinyjs)
 library(networkD3)
+library(markdown)
+library(zoo)
+library(igraph)
+library(lubridate)
+
 
 
 scale_0_1 <- function(x) {
@@ -257,6 +256,8 @@ generate_team_recommendations <- function(commit_history, diff_data, project_req
 }
 
 
+options(warn = -1)
+
 ui <- dashboardPage(
   dashboardHeader(title = "Git Repository Analysis"),
   
@@ -264,7 +265,6 @@ ui <- dashboardPage(
     sidebarMenu(
       menuItem("Репозитории", tabName = "repos", icon = icon("code-branch")),
       menuItem("Авторы", tabName = "authors", icon = icon("user")),
-      #menuItem("Анализ", tabName = "analysis", icon = icon("chart-line")),
       menuItem("Обзор организации", tabName = "overview", icon = icon("code-branch")),
       menuItem("Рекомендации", tabName = "recommendations", icon = icon("lightbulb")),
       menuItem("О программе", tabName = "about", icon = icon("info-circle"))
@@ -383,9 +383,7 @@ ui <- dashboardPage(
                   ),
                   
                   actionButton("submit", "Добавить в базу данных", 
-                               class = "btn-primary", icon = icon("play")),
-                  hr(),
-                  verbatimTextOutput("status_message")
+                               class = "btn-primary", icon = icon("play"))
                 )
               ),
               fluidRow(
@@ -525,15 +523,11 @@ server <- function(input, output, session) {
                   last_commit = format(as.POSIXct(max(date)), "%d.%m.%Y %H:%M"),
                   .groups = "drop")
     }
-    
-    
-    dbDisconnect(con, shutdown = TRUE)
   }
   
   
   observeEvent(input$submit, {
     session$sendCustomMessage(type = "show_loading", message = list())
-    values$status <- "Запуск процесса анализа..."
     
     params <- switch(as.character(input$mode),
                      "0" = list(mode = 0, repo_local_dir = input$repo_local_dir),
@@ -548,7 +542,6 @@ server <- function(input, output, session) {
           result <- do.call(run_etl_pipeline, params)
           
           if (result$status == "success") {
-            values$status <- paste(values$status, "\nАнализ успешно завершен!")
             showNotification("Данные успешно загружены!", type = "message", duration = 5)
             loadData()
           } else {
