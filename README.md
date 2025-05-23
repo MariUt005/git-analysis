@@ -6,9 +6,21 @@
 
 Руководитель: [i2z1](https://github.com/i2z1)
 
-Содержание:
-
-
+## Содержание:
+- [Презентация проекта](https://github.com/MariUt005/git-analysis/blob/master/README.md#презентация-проекта)
+- [Как запустить?](https://github.com/MariUt005/git-analysis/blob/master/README.md#как-запустить)
+  - [Требования](https://github.com/MariUt005/git-analysis/blob/master/README.md#требования)
+  - [Установка пакетов](https://github.com/MariUt005/git-analysis/blob/master/README.md#установка-пакетов)
+  - [Запуск](https://github.com/MariUt005/git-analysis/blob/master/README.md#запуск)
+  - [Используемые пакеты](https://github.com/MariUt005/git-analysis/blob/master/README.md#используемые-пакеты)
+- [Как работать?](https://github.com/MariUt005/git-analysis/blob/master/README.md#как-работать)
+  - [Добавление репозитория в базу данных](https://github.com/MariUt005/git-analysis/blob/master/README.md#добавление-репозитория-в-базу-данных)
+  - [Удаление репозитория из базы данных](https://github.com/MariUt005/git-analysis/blob/master/README.md#удаление-репозитория-из-базы-данных)
+  - [Анализ репозитория](https://github.com/MariUt005/git-analysis/blob/master/README.md#анализ-репозитория)
+  - [Анализ автора](https://github.com/MariUt005/git-analysis/blob/master/README.md#анализ-автора)
+  - [Обзор организации](https://github.com/MariUt005/git-analysis/blob/master/README.md#обзор-организации)
+  - [Рекомендации](https://github.com/MariUt005/git-analysis/blob/master/README.md#рекомендации)
+  
 ## Презентация проекта
 
 Обзор проекта от идеи до реализации представлен [здесь](https://github.com/MariUt005/git-analysis/tree/master/presentation) 
