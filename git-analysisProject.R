@@ -128,7 +128,7 @@ generate_team_recommendations <- function(commit_history, diff_data, project_req
     ungroup() %>%
     arrange(desc(total_score))
   
-  
+
   if (project_requirements$type == "fullstack") {
     backend_devs <- team_scoring %>%
       filter(primary_language %in% backend_langs) %>%
@@ -1354,7 +1354,7 @@ server <- function(input, output, session) {
       write.csv(values$authors, file, row.names = FALSE)
     }
   )
-  
+
   
   observe({
     tryCatch({
