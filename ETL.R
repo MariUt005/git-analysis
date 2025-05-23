@@ -1,36 +1,15 @@
-getGithubRepos <- function(username, token = NULL) {
+getGithubRepos <- function(username) {
   base_url <- paste0("https://api.github.com/users/", username, "/repos")
-  validate_url_availability(base_url)
+  req <- request(base_url) %>%
+    req_url_query(per_page = 100)
   
-  query <- list(
-    type = "all", 
-    per_page = 100  
-  )
-  headers <- if (!is.null(token)) {
-    add_headers(Authorization = paste("token", token))
-  } else {
-    add_headers()
-  }
-  all_repos <- list()
-  page <- 1
-  repeat {
-    query$page <- page
-    response <- GET(url = base_url, query = query, headers)
-    if (http_status(response)$category != "Success") {
-      stop("Ошибка: ", http_status(response)$message)
-    }
-    repos <- content(response, "parsed")
-    if (length(repos) == 0) break
-    all_repos <- c(all_repos, repos)
-    links_header <- headers(response)$link
-    if (is.null(links_header) || !grepl('rel="next"', links_header)) {
-      break
-    }
-    page <- page + 1
-  }
-  repo_links <- sapply(all_repos, function(x) x$clone_url)
-  return(repo_links)
+  response <- req_perform(req)
+  resp_check_status(response) 
+  
+  repos <- resp_body_json(response)
+  sapply(repos, function(x) x$clone_url)
 }
+
 
 prepareRepo <- function(mode, repo_url, repo_name, clone_dir, repo_local_dir) {
   getUrlRepo <- function(repo_url, repo_name, clone_dir, mode){
